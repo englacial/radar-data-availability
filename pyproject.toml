@@ -1,0 +1,19 @@
+[project]
+name = "data-availability-figure"
+version = "0.1.0"
+description = "Radar data availability and survey density figures for xOPR and BedMap"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "duckdb",
+    "shapely",
+    "geopandas",
+    "pyproj",
+    "cartopy",
+    "xopr",
+]
+
+[tool.uv.sources]
+xopr = { git = "https://github.com/englacial/xopr.git" }
