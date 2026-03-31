@@ -2,9 +2,11 @@
 """Survey density map from BedMap or xOPR catalogs.
 
 Configuration via command-line arguments:
-  --source: "bedmap" or "xopr" (default: bedmap)
+  --source: "bedmap", "bedmap_local", or "xopr" (default: bedmap)
   --region: "antarctica" or "greenland" (default: antarctica)
-  --grid-km: grid cell size in km (default: 30)
+  --zoom: zoom to a named sub-region (ase, wilkes, aurora)
+  --grid-km: grid cell size in km (default: 30; 0 for raw survey lines)
+  --target-spacing: target survey spacing in km; uses diverging PiYG colorscale
   --vmin/--vmax: colorbar limits (default: 0.1/10)
 """
 
@@ -64,7 +66,7 @@ ZOOM_REGIONS = {
 }
 
 
-def load_bedmap(epsg, max_point_spacing_m=1000):
+def load_bedmap(epsg, max_point_spacing_m=1000, local_cache=True):
     """Load BedMap2+3 point data and return projected segment endpoints.
 
     Parameters
@@ -83,48 +85,16 @@ def load_bedmap(epsg, max_point_spacing_m=1000):
     tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
     fetch_bedmap()
     df = query_bedmap(collections=["bedmap1", "bedmap2", "bedmap3"],
-                      columns=["lon", "lat", "source_file", "csv_row_index"],
-                      local_cache=True, show_progress=True)
+                      columns=["lon", "lat", "source_file", "row"],
+                      local_cache=local_cache, show_progress=True)
     print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files")
-    df = df.sort_values(["source_file", "csv_row_index"])
+    df = df.sort_values(["source_file", "row"])
     xs, ys = tf.transform(df["lon"].values, df["lat"].values)
     # Mask transitions between files so we don't connect unrelated points
     same_file = df["source_file"].values[:-1] == df["source_file"].values[1:]
     dists = np.sqrt(np.diff(xs)**2 + np.diff(ys)**2)
     ok = same_file & (dists < max_point_spacing_m) & (dists > 0)
     return xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok]
-
-
-LOCAL_PARQUET_DIR = SCRIPT_DIR / "local_parquet"
-
-
-def load_bedmap_local(epsg, max_point_spacing_m=1000):
-    """Load BedMap data from locally converted parquet files.
-
-    Parameters
-    ----------
-    epsg : str
-        Target CRS (e.g. "EPSG:3031").
-    max_point_spacing_m : float
-        Discard segments longer than this (gap between survey points).
-
-    Returns
-    -------
-    x1, y1, x2, y2 : np.ndarray
-        Segment endpoint arrays in the target CRS.
-    """
-    from xopr.bedmap import query_bedmap_local
-    tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
-    df = query_bedmap_local(LOCAL_PARQUET_DIR,
-                            columns=["lon", "lat", "source_file", "csv_row_index"])
-    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files")
-    df = df.sort_values(["source_file", "csv_row_index"])
-    xs, ys = tf.transform(df["lon"].values, df["lat"].values)
-    same_file = df["source_file"].values[:-1] == df["source_file"].values[1:]
-    dists = np.sqrt(np.diff(xs)**2 + np.diff(ys)**2)
-    ok = same_file & (dists < max_point_spacing_m) & (dists > 0)
-    return xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok]
-
 
 def load_xopr(region_filter=None):
     """Load geometries from xOPR STAC catalog.
@@ -215,11 +185,11 @@ if __name__ == "__main__":
     if args.source == "bedmap":
         if args.region == "greenland":
             print("  Warning: BedMap is Antarctic-only, map will be empty.")
-        x1, y1, x2, y2 = load_bedmap(reg["epsg"])
+        x1, y1, x2, y2 = load_bedmap(reg["epsg"], local_cache=False)
     elif args.source == "bedmap_local":
         if args.region == "greenland":
             print("  Warning: BedMap is Antarctic-only, map will be empty.")
-        x1, y1, x2, y2 = load_bedmap_local(reg["epsg"])
+        x1, y1, x2, y2 = load_bedmap(reg["epsg"], local_cache=True)
     else:
         region_filter = {"antarctica": "Antarctica",
                          "greenland": "Greenland"}[args.region]

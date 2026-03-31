@@ -42,7 +42,7 @@ uv run python plot_survey_density.py --source xopr --region greenland
 uv run python plot_survey_density.py --source bedmap_local --region antarctica --zoom ase
 ```
 
-Key options: `--grid-km` (cell size, default 30), `--vmin`/`--vmax` (colorbar limits), `--target-spacing` (diverging colorscale around target).
+Key options: `--grid-km` (cell size, default 30; use 0 for raw survey lines), `--zoom` (named sub-region: `ase`, `wilkes`, `aurora`), `--vmin`/`--vmax` (colorbar limits, default 0.1/10), `--target-spacing` (target survey spacing in km; switches to diverging PiYG colorscale).
 
 Using `--source bedmap_local` uses BedMap data with local cache enabled (if not downloaded yet, it will be downloaded). You can also use `--source bedmap` to ignore any local cache and not create one.
 
