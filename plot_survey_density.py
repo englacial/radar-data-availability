@@ -39,9 +39,10 @@ REGIONS = {
     "greenland": {
         "epsg": "EPSG:3413",
         "crs": lambda: ccrs.Stereographic(central_latitude=90,
+                                           central_longitude=-45,
                                            true_scale_latitude=70),
         "max_extent": 3_500_000,
-        "xlim": (-900_000, 500_000),
+        "xlim": (-900_000, 1_000_000),
         "ylim": (-3_500_000, -500_000),
     },
 }
