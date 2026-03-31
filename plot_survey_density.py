@@ -201,9 +201,12 @@ if __name__ == "__main__":
     xlim = ZOOM_REGIONS[args.zoom]["xlim"] if args.zoom else reg["xlim"]
     ylim = ZOOM_REGIONS[args.zoom]["ylim"] if args.zoom else reg["ylim"]
 
-    # Plot
+    # Plot — use gridspec to reserve consistent colorbar space
     proj = reg["crs"]()
-    fig, ax = plt.subplots(figsize=(12, 10), subplot_kw=dict(projection=proj))
+    fig = plt.figure(figsize=(12, 10))
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 0.04], wspace=0.03)
+    ax = fig.add_subplot(gs[0], projection=proj)
+    cbar_ax = fig.add_subplot(gs[1])
     ax.coastlines(resolution="10m", color="gray")
 
     if grid_m == 0:
@@ -222,6 +225,12 @@ if __name__ == "__main__":
         lc = LineCollection(segs, linewidths=0.3, colors="blue", alpha=0.5,
                             transform=proj)
         ax.add_collection(lc)
+        cbar_ax.set_yticks([])
+        cbar_ax.set_xticks([])
+        cbar_ax.spines[:].set_visible(False)
+        # Match the space taken by the colorbar label in density mode
+        cbar_ax.set_ylabel("Equivalent gridded survey spacing [km]",
+                           fontsize=14, color="none")
     else:
         line_km = bin_line_km(x1, y1, x2, y2, grid_m, reg["max_extent"])
         grid_km_size = grid_m / 1000.0
@@ -249,7 +258,7 @@ if __name__ == "__main__":
             lo = np.nanmin(finite) < args.vmin
             hi = np.nanmax(finite) > args.vmax
             extend = "both" if lo and hi else ("min" if lo else ("max" if hi else "neither"))
-        cbar = fig.colorbar(im, ax=ax, shrink=0.7, extend=extend)
+        cbar = fig.colorbar(im, cax=cbar_ax, extend=extend)
         cbar.set_label("Equivalent gridded survey spacing [km]", fontsize=14)
         cbar.ax.invert_yaxis()
 
@@ -279,9 +288,38 @@ if __name__ == "__main__":
                           .withStroke(linewidth=3, foreground="white")])
 
     plt.tight_layout()
+
+    # Minimap inset for zoom regions — render to image, place in main axes
+    if args.zoom:
+        import io
+        from matplotlib.offsetbox import OffsetImage, AnnotationBbox
+        from matplotlib.patches import Rectangle
+        mini_fig, mini_ax = plt.subplots(figsize=(3, 3),
+                                          subplot_kw=dict(projection=proj))
+        mini_ax.set_extent([reg["xlim"][0], reg["xlim"][1],
+                            reg["ylim"][0], reg["ylim"][1]], crs=proj)
+        mini_ax.coastlines(resolution="110m", color="gray", linewidth=0.8)
+        mini_ax.add_patch(Rectangle(
+            (xlim[0], ylim[0]), xlim[1] - xlim[0], ylim[1] - ylim[0],
+            linewidth=2, edgecolor="red", facecolor="red", alpha=0.25,
+            transform=proj))
+        mini_ax.axis("off")
+        mini_ax.patch.set_alpha(0)
+        buf = io.BytesIO()
+        mini_fig.savefig(buf, format="png", dpi=100, bbox_inches="tight",
+                         pad_inches=0.02, transparent=True)
+        plt.close(mini_fig)
+        buf.seek(0)
+        from matplotlib.image import imread as mpl_imread
+        mini_img = mpl_imread(buf)
+        # Place in lower-left of main axes
+        im_box = OffsetImage(mini_img, zoom=0.4)
+        ab = AnnotationBbox(im_box, (0.01, 0.01), xycoords="axes fraction",
+                            box_alignment=(0, 0), frameon=False)
+        ax.add_artist(ab)
     suffix = f"_{args.zoom}" if args.zoom else ""
     mode = "lines" if grid_m == 0 else "density"
     out_path = OUT_DIR / f"survey_{mode}_{args.source}_{args.region}{suffix}.png"
-    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.savefig(out_path, dpi=300)
     plt.show()
     print(f"Saved to {out_path}")
