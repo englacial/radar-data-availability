@@ -79,7 +79,8 @@ bm["base_name"] = bm["name"].str.replace(r"_BM[123]$", "", regex=True)
 bm = bm.sort_values("name").drop_duplicates(subset="base_name", keep="last")
 bm["line_km"] = bm["geom_wkt"].apply(geod_km_wkt)
 bm["ts"] = pd.to_datetime(bm["temporal_start"], format="ISO8601")
-bm["te"] = pd.to_datetime(bm["temporal_end"], format="ISO8601")
+bm["te"] = pd.to_datetime(bm["temporal_end"], format="ISO8601", errors="coerce")
+bm["te"] = bm["te"].fillna(bm["ts"])
 
 bm_rows = []
 for _, r in bm.iterrows():
