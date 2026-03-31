@@ -38,43 +38,14 @@ jobs:
       - name: Generate xOPR Greenland survey density
         run: uv run python plot_survey_density.py --source xopr --region greenland
 
+      - name: Generate BedMap ASE zoom
+        run: uv run python plot_survey_density.py --source bedmap --region antarctica --zoom ase
+
       - name: Build site
         run: |
           mkdir -p _site
-          cat > _site/index.html << 'HTMLEOF'
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <title>Radar Data Availability Figures</title>
-            <style>
-              body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
-              h1 { border-bottom: 1px solid #ccc; padding-bottom: 0.5rem; }
-              figure { margin: 2rem 0; }
-              img { max-width: 100%; height: auto; border: 1px solid #eee; }
-              figcaption { color: #555; margin-top: 0.5rem; }
-            </style>
-          </head>
-          <body>
-            <h1>Radar Data Availability Figures</h1>
-            <figure>
-              <img src="combined_data_availability.png" alt="Combined data availability">
-              <figcaption>Combined BedMap + xOPR data availability by year</figcaption>
-            </figure>
-            <figure>
-              <img src="survey_density_bedmap_antarctica.png" alt="BedMap Antarctica survey density">
-              <figcaption>Survey density from BedMap (Antarctica)</figcaption>
-            </figure>
-            <figure>
-              <img src="survey_density_xopr_greenland.png" alt="xOPR Greenland survey density">
-              <figcaption>Survey density from xOPR (Greenland)</figcaption>
-            </figure>
-          </body>
-          </html>
-          HTMLEOF
-          cp outputs/combined_data_availability.png _site/
-          cp outputs/survey_density_bedmap_antarctica.png _site/
-          cp outputs/survey_density_xopr_greenland.png _site/
+          cp index.html _site/
+          cp outputs/*.png _site/
 
       - name: Upload pages artifact
         uses: actions/upload-pages-artifact@v3

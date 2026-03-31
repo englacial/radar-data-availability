@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Radar Data Availability Figures</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { border-bottom: 1px solid #ccc; padding-bottom: 0.5rem; }
+    h2 { margin-top: 2.5rem; }
+    figure { margin: 2rem 0; }
+    img { max-width: 100%; height: auto; border: 1px solid #eee; }
+    figcaption { color: #555; margin-top: 0.5rem; }
+    pre { background: #f6f6f6; padding: 0.75rem 1rem; border-radius: 4px; overflow-x: auto; }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Radar Data Availability Figures</h1>
+
+  <p>
+    These are some useful figures showing airborne radar sounder data availability and survey density for
+    the Antarctic and Greenland ice sheets, using data from
+    <a href="https://github.com/englacial/xopr">xOPR</a> and BedMap catalogs.
+    Generated automatically on each push to <code>main</code>.
+  </p>
+
+  <p>See the code to generate these figures on <a href="https://github.com/englacial/radar-data-availability">GitHub</a>.</p>
+
+  <h2>Combined Data Availability</h2>
+  <figure>
+    <img src="combined_data_availability.png" alt="Combined data availability">
+    <figcaption>Combined BedMap + xOPR data availability by year, using some loose heuristics for combining the two catalogs.</figcaption>
+  </figure>
+  <pre><code>uv run python plot_combined_availability.py</code></pre>
+
+  <h2>Survey Density: BedMap Antarctica</h2>
+  <figure>
+    <img src="survey_density_bedmap_antarctica.png" alt="BedMap Antarctica survey density">
+    <figcaption>Survey density from BedMap 1, 2, and 3(Antarctica)</figcaption>
+  </figure>
+  <pre><code>uv run python plot_survey_density.py --source bedmap --region antarctica</code></pre>
+
+  <h2>Survey Density: BedMap Antarctica (Amundsen Sea Embayment)</h2>
+  <figure>
+    <img src="survey_density_bedmap_antarctica_ase.png" alt="BedMap ASE survey density">
+    <figcaption>Same density map as above, zoomed to the Amundsen Sea Embayment</figcaption>
+  </figure>
+  <pre><code>uv run python plot_survey_density.py --source bedmap --region antarctica --zoom ase</code></pre>
+
+  <h2>Survey Density: xOPR Greenland</h2>
+  <figure>
+    <img src="survey_density_xopr_greenland.png" alt="xOPR Greenland survey density">
+    <figcaption>Survey density from radar sounder data available through xOPR (Greenland)</figcaption>
+  </figure>
+  <pre><code>uv run python plot_survey_density.py --source xopr --region greenland</code></pre>
+
+</body>
+</html>
