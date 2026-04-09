@@ -21,10 +21,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from shapely.geometry import box
 
+import rioxarray
 import xopr.geometry
+from rasterio.enums import Resampling
+from rasterio.transform import from_bounds
 
 from plot_survey_density import (
-    REGIONS, OUT_DIR, bin_line_km, load_bedmap, load_bedmap_local,
+    REGIONS, OUT_DIR, bin_line_km, load_bedmap,
     load_xopr, extract_segments,
 )
 
@@ -99,6 +102,55 @@ def make_coastal_mask(basins, coastline, grid_m, max_extent, coast_dist_m):
     return mask, basin_labels
 
 
+def load_velocity_grid(grid_m, max_extent, overview_level=4):
+    """Load ITS-LIVE velocity mosaic and compute 90th-percentile velocity per grid cell.
+
+    Returns 2D array (nx, nx) of velocity in m/year, aligned with the
+    analysis grid (first axis = x, second = y, origin at -max_extent).
+    """
+    url = ("https://its-live-data.s3.amazonaws.com/velocity_mosaic/v2/"
+           "static/cog/ITS_LIVE_velocity_120m_RGI19A_0000_v02_v.tif")
+    vel = rioxarray.open_rasterio(
+        url, chunks='auto', overview_level=overview_level, cache=False,
+    ).squeeze().drop_vars('band')
+
+    # Reproject at overview resolution (not grid resolution) to preserve detail
+    vel_reproj = vel.rio.reproject('EPSG:3031').compute()
+    vals = vel_reproj.values  # (rows=y_desc, cols=x_asc)
+    ys = vel_reproj.y.values  # descending
+    xs = vel_reproj.x.values  # ascending
+
+    # Map each velocity pixel to a grid cell index
+    nx = int(2 * max_extent / grid_m)
+    ix = ((xs + max_extent) / grid_m).astype(int)
+    iy = ((ys + max_extent) / grid_m).astype(int)
+
+    # Build flat arrays of (grid_cell_flat_index, value) for valid pixels
+    ix_grid, iy_grid = np.meshgrid(ix, iy)  # both shape (nrows, ncols)
+    valid = (
+        np.isfinite(vals)
+        & (ix_grid >= 0) & (ix_grid < nx)
+        & (iy_grid >= 0) & (iy_grid < nx)
+    )
+    cell_idx = ix_grid[valid] * nx + iy_grid[valid]
+    cell_vals = vals[valid]
+
+    # Sort by cell index, then compute 90th percentile per cell
+    order = np.argsort(cell_idx)
+    cell_idx = cell_idx[order]
+    cell_vals = cell_vals[order]
+    splits = np.searchsorted(cell_idx, np.arange(nx * nx), side='left')
+    splits = np.append(splits, len(cell_idx))
+
+    result = np.full(nx * nx, np.nan)
+    for c in range(nx * nx):
+        s, e = splits[c], splits[c + 1]
+        if e > s:
+            result[c] = np.percentile(cell_vals[s:e], 90)
+
+    return result.reshape(nx, nx)
+
+
 def compute_gap_table(line_km, mask, basin_labels, grid_km, target_km):
     """Compute additional line-km needed per basin.
 
@@ -116,11 +168,16 @@ def compute_gap_table(line_km, mask, basin_labels, grid_km, target_km):
             continue
         cell_km = line_km[sel]
         deficit = np.maximum(0, needed_per_cell - cell_km)
+        # Equivalent spacing per cell: 2 * grid_km^2 / line_km (inf where line_km == 0)
+        with np.errstate(divide='ignore'):
+            cell_spacing = 2 * grid_km**2 / cell_km
+        cell_spacing[cell_km == 0] = np.inf
         rows.append({
             'basin': label,
             'n_cells': int(n_cells),
             'area_km2': int(n_cells * grid_km**2),
             'total_line_km': float(cell_km.sum()),
+            'median_spacing_km': float(np.median(cell_spacing)),
             'additional_line_km': float(deficit.sum()),
             'cells_below_target': int((cell_km < needed_per_cell).sum()),
             'pct_below_target': float((cell_km < needed_per_cell).sum() / n_cells * 100),
@@ -142,6 +199,13 @@ def main():
                    help='Target equivalent resolution [km]')
     p.add_argument('--vmin', type=float, default=0.1)
     p.add_argument('--vmax', type=float, default=10)
+    p.add_argument('--min-velocity', type=float, default=None,
+                   help='Only include cells where max surface velocity >= this value [m/year]')
+    basin_filter = p.add_mutually_exclusive_group()
+    basin_filter.add_argument('--exclude-basins', type=str, default=None,
+                   help='Comma-separated list of basins to exclude (e.g. "H-Hp,Ipp-J")')
+    basin_filter.add_argument('--include-basins', type=str, default=None,
+                   help='Comma-separated list of basins to include (whitelist, e.g. "A-Ap,Ep-F")')
     p.add_argument('--rdgn', nargs=3, type=float, default=None, metavar=('GREEN', 'MID', 'RED'),
                    help='Use red-green diverging colorscale (green=good, mid=center, red=bad)')
     args = p.parse_args()
@@ -152,9 +216,9 @@ def main():
     # Load survey data
     print(f'Loading {args.source} data...')
     if args.source == 'bedmap':
-        x1, y1, x2, y2 = load_bedmap(reg['epsg'])
+        x1, y1, x2, y2 = load_bedmap(reg['epsg'], local_cache=False)
     elif args.source == 'bedmap_local':
-        x1, y1, x2, y2 = load_bedmap_local(reg['epsg'])
+        x1, y1, x2, y2 = load_bedmap(reg['epsg'], local_cache=True)
     else:
         geoms = load_xopr(region_filter='Antarctica')
         x1, y1, x2, y2 = extract_segments(geoms, reg['epsg'])
@@ -172,8 +236,31 @@ def main():
         basins, coastline, grid_m, reg['max_extent'],
         args.coast_dist_km * 1000,
     )
+    # Filter basins if requested
+    if args.exclude_basins is not None:
+        excluded = {b.strip() for b in args.exclude_basins.split(',')}
+        for i, label in enumerate(basin_labels):
+            if label in excluded:
+                mask[mask == i] = -1
+        print(f'  Excluded basins: {", ".join(sorted(excluded))}')
+    elif args.include_basins is not None:
+        included = {b.strip() for b in args.include_basins.split(',')}
+        for i, label in enumerate(basin_labels):
+            if label not in included:
+                mask[mask == i] = -1
+        print(f'  Included basins: {", ".join(sorted(included))}')
+
     n_coastal = (mask >= 0).sum()
     print(f'  {n_coastal} coastal grid cells across {len(basin_labels)} basins')
+
+    # Optional velocity filter
+    if args.min_velocity is not None:
+        print(f'Loading velocity data (threshold {args.min_velocity} m/yr)...')
+        vel_grid = load_velocity_grid(grid_m, reg['max_extent'])
+        slow = np.isnan(vel_grid) | (vel_grid < args.min_velocity)
+        n_removed = ((mask >= 0) & slow).sum()
+        mask[slow] = -1
+        print(f'  Removed {n_removed} cells below {args.min_velocity} m/yr')
 
     # Compute equivalent spacing (only for coastal cells)
     grid_km_size = args.grid_km
@@ -189,16 +276,20 @@ def main():
     total_additional = sum(r['additional_line_km'] for r in gap_table)
 
     print(f'\n{"Basin":<10} {"Cells":>6} {"Area km²":>10} {"Exist. km":>12} '
-          f'{"Need. km":>12} {"Below %":>8}')
-    print('-' * 66)
+          f'{"Med. sp. km":>12} {"Need. km":>12} {"Below %":>8}')
+    print('-' * 78)
     for r in gap_table:
+        med_sp = r['median_spacing_km']
+        med_str = f'{med_sp:>12.1f}' if np.isfinite(med_sp) else f'{"inf":>12}'
         print(f'{r["basin"]:<10} {r["n_cells"]:>6} {r["area_km2"]:>10} '
-              f'{r["total_line_km"]:>12.0f} {r["additional_line_km"]:>12.0f} '
+              f'{r["total_line_km"]:>12.0f} {med_str} '
+              f'{r["additional_line_km"]:>12.0f} '
               f'{r["pct_below_target"]:>7.1f}%')
-    print('-' * 66)
+    print('-' * 78)
     print(f'{"TOTAL":<10} {sum(r["n_cells"] for r in gap_table):>6} '
           f'{sum(r["area_km2"] for r in gap_table):>10} '
           f'{sum(r["total_line_km"] for r in gap_table):>12.0f} '
+          f'{"":>12} '
           f'{total_additional:>12.0f}')
     print(f'\nTarget resolution: {args.target_km} km')
     print(f'Total additional line-km needed: {total_additional:,.0f}')
@@ -263,10 +354,10 @@ def main():
     ax.set_xlim(*reg['xlim'])
     ax.set_ylim(*reg['ylim'])
     ax.set_aspect('equal')
-    ax.set_title(
-        f'Coastal survey density ({args.coast_dist_km:.0f} km from coast)',
-        fontsize=14,
-    )
+    title = f'Coastal survey density ({args.coast_dist_km:.0f} km from coast)'
+    if args.min_velocity is not None:
+        title += f', velocity ≥ {args.min_velocity} m/yr'
+    ax.set_title(title, fontsize=14)
 
     # Legend for pie colors
     from matplotlib.patches import Patch
@@ -310,7 +401,8 @@ def main():
                 ha='center', va='top', fontsize=5, color='#333333', zorder=6)
 
     plt.tight_layout()
-    out_path = OUT_DIR / f'coastal_density_{args.source}_{args.coast_dist_km:.0f}km.png'
+    vel_suffix = f'_vel{args.min_velocity:.0f}' if args.min_velocity is not None else ''
+    out_path = OUT_DIR / f'coastal_density_{args.source}_{args.coast_dist_km:.0f}km{vel_suffix}.png'
     plt.savefig(out_path, dpi=300, bbox_inches='tight')
     print(f'\nSaved map to {out_path}')
 

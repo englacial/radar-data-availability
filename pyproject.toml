@@ -12,6 +12,8 @@ dependencies = [
     "geopandas",
     "pyproj",
     "cartopy",
+    "rioxarray",
+    "rasterio",
     "xopr",
 ]
 
