@@ -110,9 +110,12 @@ def load_velocity_grid(grid_m, max_extent, overview_level=4):
     """
     url = ("https://its-live-data.s3.amazonaws.com/velocity_mosaic/v2/"
            "static/cog/ITS_LIVE_velocity_120m_RGI19A_0000_v02_v.tif")
-    vel = rioxarray.open_rasterio(
-        url, chunks='auto', overview_level=overview_level, cache=False,
-    ).squeeze().drop_vars('band')
+    local_path = Path(__file__).parent / "radar_cache" / "velocity" / "ITS_LIVE_velocity_120m_RGI19A_0000_v02_v.tif"
+    source = str(local_path) if local_path.exists() else url
+    open_kw = dict(chunks='auto', overview_level=overview_level)
+    if source == url:
+        open_kw['cache'] = False
+    vel = rioxarray.open_rasterio(source, **open_kw).squeeze().drop_vars('band')
 
     # Reproject at overview resolution (not grid resolution) to preserve detail
     vel_reproj = vel.rio.reproject('EPSG:3031').compute()
@@ -185,6 +188,258 @@ def compute_gap_table(line_km, mask, basin_labels, grid_km, target_km):
     return sorted(rows, key=lambda r: -r['additional_line_km'])
 
 
+def _plot_geometry(ax, geom, **kwargs):
+    """Plot a shapely geometry's outline on matplotlib axes."""
+    from shapely.geometry import LineString, Polygon, MultiLineString, MultiPolygon, GeometryCollection
+    if isinstance(geom, LineString):
+        xs, ys = geom.coords.xy
+        ax.plot(xs, ys, **kwargs)
+    elif isinstance(geom, Polygon):
+        xs, ys = geom.exterior.coords.xy
+        ax.plot(xs, ys, **kwargs)
+    elif isinstance(geom, (MultiLineString, MultiPolygon, GeometryCollection)):
+        for g in geom.geoms:
+            _plot_geometry(ax, g, **kwargs)
+
+
+def plot_side_by_side(density, mask, basin_labels, gap_table, basins,
+                      coastline_geom, grid_m, max_extent, args):
+    """Plot each active basin in its own panel, rotated so coast faces down."""
+    from shapely.affinity import rotate as shapely_rotate
+    from matplotlib.patches import Wedge, Patch
+    from matplotlib.patches import Polygon as MplPolygon
+    from matplotlib.gridspec import GridSpec
+    import pyproj
+
+    gap_lookup = {r['basin']: r for r in gap_table}
+    transformer = pyproj.Transformer.from_crs('EPSG:3031', 'EPSG:4326', always_xy=True)
+
+    nx_grid = density.shape[0]
+    centers = np.linspace(-max_extent + grid_m / 2, max_extent - grid_m / 2, nx_grid)
+    edges = np.linspace(-max_extent, -max_extent + nx_grid * grid_m, nx_grid + 1)
+    ex, ey = np.meshgrid(edges, edges, indexing='ij')
+
+    # Find active basins and compute rotation angles
+    active = []
+    for i, label in enumerate(basin_labels):
+        n_cells = (mask == i).sum()
+        if n_cells == 0 or label not in gap_lookup:
+            continue
+        basin_geom = basins[basins['SUBREGION'] == label].iloc[0].geometry
+        cx, cy = basin_geom.centroid.x, basin_geom.centroid.y
+        lon, _ = transformer.transform(cx, cy)
+        theta = np.arctan2(cy, cx)
+        # Rotate so coast (radially outward) points downward
+        rot = -np.pi / 2 - theta
+
+        # Compute bounds from coastal cells in rotated frame
+        cell_ij = np.argwhere(mask == i)
+        cell_x = centers[cell_ij[:, 0]]
+        cell_y = centers[cell_ij[:, 1]]
+        cos_a, sin_a = np.cos(rot), np.sin(rot)
+        rx = cell_x * cos_a - cell_y * sin_a
+        ry = cell_x * sin_a + cell_y * cos_a
+        ext = max(rx.max() - rx.min(), ry.max() - ry.min())
+        pad = max(ext * 0.4, grid_m * 5)
+
+        active.append({
+            'idx': i, 'label': label, 'geom': basin_geom,
+            'lon': lon, 'rot': rot,
+            'xlim': (rx.min() - pad, rx.max() + pad),
+            'ylim': (ry.min() - pad, ry.max() + pad),
+            'stats': gap_lookup[label],
+        })
+
+    active.sort(key=lambda b: b['lon'])
+    n = len(active)
+    if n == 0:
+        print('No active basins to plot in side-by-side mode.')
+        return None
+
+    # Colormap / norm (same logic as main plot)
+    if args.rdgn is not None:
+        from matplotlib.colors import LinearSegmentedColormap
+        green_val, mid_val, red_val = args.rdgn
+        norm = mcolors.Normalize(vmin=green_val, vmax=red_val)
+        base = plt.cm.PiYG_r
+        mid_frac = (mid_val - green_val) / (red_val - green_val)
+        nn = 256
+        positions = np.linspace(0, 1, nn)
+        base_positions = np.where(
+            positions <= mid_frac,
+            0.5 * positions / mid_frac,
+            0.5 + 0.5 * (positions - mid_frac) / (1 - mid_frac),
+        )
+        cmap = LinearSegmentedColormap.from_list(
+            'rdgn_recentered', base(base_positions), N=nn,
+        )
+    else:
+        norm = mcolors.Normalize(vmin=args.vmin, vmax=args.vmax)
+        cmap = plt.cm.inferno.copy()
+        cmap.set_over('white')
+
+    # Panel colors for linking basins to overview (cycle tab10)
+    panel_colors = [plt.cm.tab10(i % 10) for i in range(n)]
+
+    # Grid layout: small overview first, then basin panels
+    n_cols = n + 2  # overview + basins + colorbar
+    cell_size = 3.2  # inches per basin panel
+    ov_ratio = 0.45  # overview width relative to a basin panel
+
+    # Compute width ratios: overview, basin panels, colorbar
+    width_ratios = [ov_ratio] + [1] * n + [0.04]
+    fig_w = (ov_ratio + n) * cell_size + 1.0
+    fig_h = cell_size + 1.0
+    fig = plt.figure(figsize=(fig_w, fig_h))
+
+    gs = GridSpec(1, n_cols, figure=fig, width_ratios=width_ratios,
+                  left=0.02, right=0.94, bottom=0.04, top=0.92,
+                  wspace=0.15)
+
+    # Pre-rotate coastline and basin boundaries once per unique rotation
+    basin_subregions = basins['SUBREGION'].tolist()
+    rot_cache = {}
+    for b in active:
+        rot_deg = np.degrees(b['rot'])
+        if rot_deg not in rot_cache:
+            rot_coast = shapely_rotate(coastline_geom, rot_deg, origin=(0, 0))
+            rot_basins = [
+                (basin_subregions[i],
+                 shapely_rotate(row.geometry, rot_deg, origin=(0, 0)))
+                for i, (_, row) in enumerate(basins.iterrows())
+            ]
+            rot_cache[rot_deg] = (rot_coast, rot_basins)
+
+    # Overview first (column 0)
+    proj = ccrs.Stereographic(central_latitude=-90, true_scale_latitude=-71)
+    ax_ov = fig.add_subplot(gs[0, 0], projection=proj)
+    ax_ov.coastlines(resolution='50m', color='gray', linewidth=0.5)
+    ax_ov.set_xlim(-2.8e6, 2.8e6)
+    ax_ov.set_ylim(-2.8e6, 2.8e6)
+    for _, row in basins.iterrows():
+        polys = row.geometry.geoms if hasattr(row.geometry, 'geoms') else [row.geometry]
+        for poly in polys:
+            if hasattr(poly, 'exterior'):
+                bxs, bys = poly.exterior.coords.xy
+                ax_ov.plot(bxs, bys, color='#aaaaaa', linewidth=0.3,
+                           transform=proj)
+    for panel_idx, b in enumerate(active):
+        polys = b['geom'].geoms if hasattr(b['geom'], 'geoms') else [b['geom']]
+        for poly in polys:
+            if hasattr(poly, 'exterior'):
+                coords = np.array(poly.exterior.coords)
+                patch = MplPolygon(coords, facecolor=panel_colors[panel_idx],
+                                   alpha=0.4, edgecolor=panel_colors[panel_idx],
+                                   linewidth=1.5, transform=proj, zorder=3)
+                ax_ov.add_patch(patch)
+    ax_ov.set_aspect('equal')
+    ax_ov.axis('off')
+
+    # Plot each basin panel (columns 1..n)
+    bar_info = []  # (ax, pct) tuples for deferred progress bar drawing
+    for panel_idx, b in enumerate(active):
+        ax = fig.add_subplot(gs[0, panel_idx + 1])
+        cos_a, sin_a = np.cos(b['rot']), np.sin(b['rot'])
+
+        # Rotate grid edges
+        rx = ex * cos_a - ey * sin_a
+        ry = ex * sin_a + ey * cos_a
+
+        # Mask density to this basin only
+        d = density.copy()
+        d[mask != b['idx']] = np.nan
+
+        ax.pcolormesh(rx, ry, d, norm=norm, cmap=cmap, shading='flat')
+
+        # Draw rotated coastline and basin boundaries
+        rot_deg = np.degrees(b['rot'])
+        rot_coast, rot_basins_list = rot_cache[rot_deg]
+        _plot_geometry(ax, rot_coast, color='gray', linewidth=0.5)
+        for blabel, rot_bnd in rot_basins_list:
+            is_active = (blabel == b['label'])
+            color = panel_colors[panel_idx] if is_active else '#555555'
+            lw = 0.9 if is_active else 0.2
+            polys = rot_bnd.geoms if hasattr(rot_bnd, 'geoms') else [rot_bnd]
+            for poly in polys:
+                if hasattr(poly, 'exterior'):
+                    bxs, bys = poly.exterior.coords.xy
+                    ax.plot(bxs, bys, color=color, linewidth=lw,
+                            zorder=4 if is_active else 2)
+
+        ax.set_xlim(*b['xlim'])
+        ax.set_ylim(*b['ylim'])
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        # Collect info for progress bars (drawn after layout is resolved)
+        stats = b['stats']
+        collected = stats['total_line_km']
+        additional = stats['additional_line_km']
+        total = collected + additional
+        if total > 0:
+            bar_info.append((ax, collected / total))
+
+    # Colorbar (last column)
+    import matplotlib.cm as mcm
+    cbar_ax = fig.add_subplot(gs[0, n + 1])
+    sm = mcm.ScalarMappable(norm=norm, cmap=cmap)
+    finite = density[np.isfinite(density) & (mask >= 0)]
+    vlo, vhi = norm.vmin, norm.vmax
+    if len(finite) == 0:
+        extend = 'neither'
+    else:
+        lo = np.nanmin(finite) < vlo
+        hi = np.nanmax(finite) > vhi
+        extend = ('both' if lo and hi else
+                  ('min' if lo else ('max' if hi else 'neither')))
+    cbar = fig.colorbar(sm, cax=cbar_ax, extend=extend)
+    cbar.set_label('Equivalent gridded survey spacing [km]', fontsize=10)
+    cbar.ax.invert_yaxis()
+
+    # Draw progress bars at a consistent figure-Y position
+    if bar_info:
+        from matplotlib.patches import Rectangle
+        fig.canvas.draw_idle()
+        renderer = fig.canvas.get_renderer()
+        fig_h = fig.get_size_inches()[1] * fig.dpi
+        target_h_pts = 15  # fixed bar height in points
+        bar_w_frac = 0.35
+        # Use top of the tallest panel as reference Y (in figure fraction)
+        bar_top_fig = max(
+            ax.get_position().y1 for ax, _ in bar_info
+        ) - 0.01  # small margin below top
+        bar_h_fig = target_h_pts / fig_h
+        bar_y_fig = bar_top_fig - bar_h_fig
+        for ax, pct in bar_info:
+            pos = ax.get_position()
+            # Place bar in figure coords: right-aligned within each panel
+            bar_x_fig = pos.x1 - bar_w_frac * pos.width - 0.02 * pos.width
+            bar_w_fig = bar_w_frac * pos.width
+            bar_ax = fig.add_axes([bar_x_fig, bar_y_fig, bar_w_fig, bar_h_fig])
+            bar_ax.set_xlim(0, 1)
+            bar_ax.set_ylim(0, 1)
+            bar_ax.add_patch(Rectangle((0, 0), 1, 1,
+                                       facecolor='white', edgecolor='#333333',
+                                       linewidth=0.6))
+            bar_ax.add_patch(Rectangle((0, 0), pct, 1,
+                                       facecolor='#1f77b4', edgecolor='none'))
+            bar_ax.add_patch(Rectangle((0, 0), 1, 1,
+                                       facecolor='none', edgecolor='#333333',
+                                       linewidth=0.6))
+            bar_ax.text(0.5, 0.5, f'{pct:.0%}', ha='center', va='center',
+                        fontsize=7, fontweight='bold', color='black',
+                        transform=bar_ax.transAxes)
+            bar_ax.axis('off')
+
+    # Title
+    title = f'Coastal survey density ({args.coast_dist_km:.0f} km from coast)'
+    if args.min_velocity is not None:
+        title += f', velocity \u2265 {args.min_velocity} m/yr'
+    fig.suptitle(title, fontsize=14)
+
+    return fig
+
+
 def main():
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -208,6 +463,10 @@ def main():
                    help='Comma-separated list of basins to include (whitelist, e.g. "A-Ap,Ep-F")')
     p.add_argument('--rdgn', nargs=3, type=float, default=None, metavar=('GREEN', 'MID', 'RED'),
                    help='Use red-green diverging colorscale (green=good, mid=center, red=bad)')
+    p.add_argument('--side-by-side', action='store_true',
+                   help='Show each basin separately side by side with coast at bottom')
+    p.add_argument('--set-resolution', type=float, default=None,
+                   help='Override all coastal cells to this equivalent spacing [km]')
     args = p.parse_args()
 
     grid_m = int(args.grid_km * 1000)
@@ -269,6 +528,13 @@ def main():
     density[line_km == 0] = np.nan
     density[mask < 0] = np.nan  # mask out non-coastal cells
 
+    # Override density if --set-resolution is given
+    if args.set_resolution is not None:
+        density[mask >= 0] = args.set_resolution
+        # Also override line_km so gap table reflects the set resolution
+        line_km[mask >= 0] = 2 * grid_km_size**2 / args.set_resolution
+        print(f'  Overriding all coastal cells to {args.set_resolution} km spacing')
+
     # Gap analysis table
     gap_table = compute_gap_table(
         line_km, mask, basin_labels, grid_km_size, args.target_km,
@@ -294,6 +560,22 @@ def main():
     print(f'\nTarget resolution: {args.target_km} km')
     print(f'Total additional line-km needed: {total_additional:,.0f}')
 
+    # Side-by-side mode
+    if args.side_by_side:
+        fig = plot_side_by_side(
+            density, mask, basin_labels, gap_table, basins,
+            coastline, grid_m, reg['max_extent'], args,
+        )
+        if fig is not None:
+            vel_suffix = (f'_vel{args.min_velocity:.0f}'
+                          if args.min_velocity is not None else '')
+            out_path = (OUT_DIR /
+                        f'coastal_density_{args.source}_{args.coast_dist_km:.0f}km'
+                        f'{vel_suffix}_sidebyside.png')
+            plt.savefig(out_path, dpi=300, bbox_inches='tight')
+            print(f'\nSaved side-by-side map to {out_path}')
+        return
+
     # Plot
     proj = reg['crs']()
     fig, ax = plt.subplots(figsize=(12, 10), subplot_kw=dict(projection=proj))
@@ -307,8 +589,8 @@ def main():
         from matplotlib.colors import LinearSegmentedColormap
         green_val, mid_val, red_val = args.rdgn
         norm = mcolors.Normalize(vmin=green_val, vmax=red_val)
-        # Resample RdYlGn_r so midpoint color lands at mid_val in linear scale
-        base = plt.cm.RdYlGn_r
+        # Resample PiYG so midpoint color lands at mid_val in linear scale
+        base = plt.cm.PiYG_r
         mid_frac = (mid_val - green_val) / (red_val - green_val)
         n = 256
         # Map linear [0,1] positions to base colormap positions via piecewise linear
