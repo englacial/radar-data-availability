@@ -14,7 +14,13 @@ dependencies = [
     "cartopy",
     "rioxarray",
     "rasterio",
-    "xopr",
+    "xopr>=0.5",
+    "scipy>=1.17.1",
+    "bokeh>=3.9.0",
+    "holoviews>=1.22.1",
+    "panel>=1.8.10",
+    "geoviews>=1.15.1",
+    "watchfiles>=1.1.1",
 ]
 
 [tool.uv.sources]
