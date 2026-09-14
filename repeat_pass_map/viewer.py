@@ -10,6 +10,7 @@ Run with:  uv run panel serve viewer.py --show
 """
 
 import io
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,29 +30,48 @@ pn.config.loading_spinner = "arc"
 pn.config.loading_color = "#1976d2"
 
 SCRIPT_DIR = Path(__file__).parent
-OUT_DIR = SCRIPT_DIR.parent / "outputs"
+OUT_ROOT = SCRIPT_DIR.parent / "outputs"
 
-PROJ_EPSG = 3413
-TOL_M = 1000.0  # for projecting altitude traces onto corridor reference
-MAP_SIZE = 560  # frame width = frame height (square plot area)
-MAP_WIDTH = MAP_SIZE
-MAP_HEIGHT = MAP_SIZE
-GREENLAND_BBOX_WGS84 = (-75, 58, -10, 84)
+# Region is chosen via the REGION env var (set e.g. `REGION=Antarctica panel serve viewer.py`).
+REGION = os.environ.get("REGION", "Greenland")
 
-# Square data bounding box (EPSG:3413) used by the overview map. Width and height
-# spans are equal so that with the same pixel width/height the plot is square
-# and matches the detail map exactly.
-_OVERVIEW_CX, _OVERVIEW_CY = -250_000, -2_000_000
-_OVERVIEW_HALF = 1_550_000
+# Per-region projection, coastline clip, and overview map extent.
+REGION_CFG = {
+    "Greenland": dict(
+        epsg=3413,
+        bbox_wgs84=(-75, 58, -10, 84),
+        overview_center=(-250_000, -2_000_000),
+        overview_half=1_550_000,
+    ),
+    "Antarctica": dict(
+        epsg=3031,
+        bbox_wgs84=(-180, -90, 180, -60),
+        overview_center=(0, 0),
+        overview_half=3_100_000,
+    ),
+}
+
+_CFG = REGION_CFG[REGION]
+PROJ_EPSG = _CFG["epsg"]
+REGION_BBOX_WGS84 = _CFG["bbox_wgs84"]
+_OVERVIEW_CX, _OVERVIEW_CY = _CFG["overview_center"]
+_OVERVIEW_HALF = _CFG["overview_half"]
 OVERVIEW_XLIM = (_OVERVIEW_CX - _OVERVIEW_HALF, _OVERVIEW_CX + _OVERVIEW_HALF)
 OVERVIEW_YLIM = (_OVERVIEW_CY - _OVERVIEW_HALF, _OVERVIEW_CY + _OVERVIEW_HALF)
 
+OUT_DIR = OUT_ROOT / REGION.lower()
+
+TOL_M = 1000.0  # for projecting altitude traces onto corridor reference
+MAP_SIZE = 560
+MAP_WIDTH = MAP_SIZE
+MAP_HEIGHT = MAP_SIZE
+
 
 @lru_cache(maxsize=1)
-def greenland_coastline_segments() -> list[dict]:
-    """Return list of dicts with x/y arrays of Greenland coastline in EPSG:3413."""
+def coastline_segments() -> list[dict]:
+    """Return list of dicts with x/y arrays of the region's coastline in its polar EPSG."""
     tx = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{PROJ_EPSG}", always_xy=True)
-    clip = box(*GREENLAND_BBOX_WGS84)
+    clip = box(*REGION_BBOX_WGS84)
     coast = cfeature.NaturalEarthFeature("physical", "coastline", "50m")
     segs = []
     for geom in coast.geometries():
@@ -73,7 +93,7 @@ def greenland_coastline_segments() -> list[dict]:
 
 
 def coastline_overlay():
-    segs = greenland_coastline_segments()
+    segs = coastline_segments()
     return hv.Path(segs, kdims=["x", "y"]).opts(
         color="black", line_width=0.5, alpha=0.7,
     )
@@ -309,7 +329,7 @@ def bulk_reference_kml(min_flights: int, min_length_km: float) -> bytes:
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<kml xmlns="http://www.opengis.net/kml/2.2">\n'
         '  <Document>\n'
-        f'    <name>Greenland corridors — ≥{min_flights} flights, ≥{int(min_length_km)} km '
+        f'    <name>{REGION} corridors — ≥{min_flights} flights, ≥{int(min_length_km)} km '
         f'({len(parts)} corridors)</name>\n'
         f'{body}'
         '  </Document>\n'
@@ -490,7 +510,7 @@ def _bulk_kml_button(min_flights, min_length):
 
 
 sidebar = pn.Column(
-    "## Greenland repeat-flight corridors",
+    f"## {REGION} repeat-flight corridors",
     min_flights_slider,
     min_length_slider,
     corridor_select,

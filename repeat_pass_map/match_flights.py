@@ -6,13 +6,14 @@ A sub-path is a contiguous run along one flight where it travels alongside
 than max_len_km are split into fixed-length chunks. Pairs of sub-paths from
 different flights are clustered into corridors based on mutual spatial coverage.
 
-Outputs:
-  outputs/flights.parquet         one row per flight (segment) with metadata
-  outputs/flight_points.parquet   densified points in EPSG:3413 with sub_id
-  outputs/subpaths.parquet        one row per sub-path (incl. corridor_id)
-  outputs/corridors.parquet       one row per corridor (>=2 sub-paths from >=2 flights)
+Outputs (under outputs/<region>/):
+  flights.parquet         one row per flight (segment) with metadata
+  flight_points.parquet   densified points in region's polar EPSG with sub_id
+  subpaths.parquet        one row per sub-path (incl. corridor_id)
+  corridors.parquet       one row per corridor (>=2 sub-paths from >=2 flights)
 """
 
+import argparse
 from pathlib import Path
 
 import geopandas as gpd
@@ -27,11 +28,12 @@ from scipy.spatial import cKDTree
 from shapely.ops import transform
 
 SCRIPT_DIR = Path(__file__).parent
-OUT_DIR = SCRIPT_DIR.parent / "outputs"
-OUT_DIR.mkdir(exist_ok=True)
+OUT_ROOT = SCRIPT_DIR.parent / "outputs"
 
-REGION = "Greenland"
-EPSG = 3413  # NSIDC Sea Ice Polar Stereographic North
+EPSG_BY_REGION = {
+    "Greenland": 3413,   # NSIDC Sea Ice Polar Stereographic North
+    "Antarctica": 3031,  # Antarctic Polar Stereographic
+}
 
 DENSIFY_SPACING_M = 250.0
 TOL_M = 500.0
@@ -81,8 +83,8 @@ def densify_line(line: shapely.geometry.LineString, spacing: float) -> np.ndarra
     return np.array([(p.x, p.y) for p in pts])
 
 
-def build_point_table(gdf: gpd.GeoDataFrame, spacing: float) -> pd.DataFrame:
-    transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{EPSG}", always_xy=True)
+def build_point_table(gdf: gpd.GeoDataFrame, spacing: float, epsg: int) -> pd.DataFrame:
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
     rows = []
     for _, item in gdf.iterrows():
         line_wgs84 = item.geometry
@@ -433,12 +435,21 @@ def stitch_corridors(subpaths: pd.DataFrame, min_bridges: int = 2,
 # --------------------------------------------------------------------------
 
 def main() -> None:
-    print(f"Loading {REGION} items...")
-    gdf = load_region_items(REGION)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--region", choices=sorted(EPSG_BY_REGION),
+                        default="Greenland")
+    args = parser.parse_args()
+    region = args.region
+    epsg = EPSG_BY_REGION[region]
+    out_dir = OUT_ROOT / region.lower()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Loading {region} items (EPSG:{epsg}) -> {out_dir}/")
+    gdf = load_region_items(region)
     print(f"Loaded {len(gdf)} frames across {gdf['flight_id'].nunique()} flights")
 
-    print(f"Densifying lines at {DENSIFY_SPACING_M} m in EPSG:{EPSG}...")
-    points = build_point_table(gdf, DENSIFY_SPACING_M)
+    print(f"Densifying lines at {DENSIFY_SPACING_M} m in EPSG:{epsg}...")
+    points = build_point_table(gdf, DENSIFY_SPACING_M, epsg)
     print(f"  {len(points):,} points total")
 
     print("Computing tangents...")
@@ -500,11 +511,11 @@ def main() -> None:
         })
     flights_df = pd.DataFrame(flight_rows)
 
-    points.to_parquet(OUT_DIR / "flight_points.parquet", index=False)
-    subpaths.to_parquet(OUT_DIR / "subpaths.parquet", index=False)
-    corridors.to_parquet(OUT_DIR / "corridors.parquet", index=False)
-    flights_df.to_parquet(OUT_DIR / "flights.parquet", index=False)
-    print(f"Wrote outputs/{{flight_points,subpaths,corridors,flights}}.parquet")
+    points.to_parquet(out_dir / "flight_points.parquet", index=False)
+    subpaths.to_parquet(out_dir / "subpaths.parquet", index=False)
+    corridors.to_parquet(out_dir / "corridors.parquet", index=False)
+    flights_df.to_parquet(out_dir / "flights.parquet", index=False)
+    print(f"Wrote {out_dir}/{{flight_points,subpaths,corridors,flights}}.parquet")
     print()
     print("Top corridors:")
     print(corridors[["corridor_id", "n_subpaths", "n_flights", "total_length_km", "mean_length_km"]].head(15).to_string(index=False))

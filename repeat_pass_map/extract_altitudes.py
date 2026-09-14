@@ -5,9 +5,9 @@ Only uses the CSARP_layer HDF5 asset (≈0.1 MB) — orders of magnitude faster
 than downloading the full CSARP_standard radar file. Frames without a
 CSARP_layer asset (e.g., pre-2002 collections) are skipped.
 
-Outputs:
-  outputs/altitudes/{item_id}.parquet   one file per frame (cache)
-  outputs/altitudes.parquet             concatenated table
+Outputs (under outputs/<region>/):
+  altitudes/{item_id}.parquet   one file per frame (cache)
+  altitudes.parquet             concatenated table
 """
 
 import argparse
@@ -24,9 +24,7 @@ import xopr
 from pyproj import Geod
 
 SCRIPT_DIR = Path(__file__).parent
-OUT_DIR = SCRIPT_DIR.parent / "outputs"
-CACHE_DIR = OUT_DIR / "altitudes"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+OUT_ROOT = SCRIPT_DIR.parent / "outputs"
 
 DOWNSAMPLE_M = 50.0
 N_WORKERS = 8
@@ -35,10 +33,10 @@ GEOD = Geod(ellps="WGS84")
 CANONICAL = ("latitude", "longitude", "elevation", "gps_time")
 
 
-def items_in_corridors(min_n_flights: int) -> list[str]:
-    points = pd.read_parquet(OUT_DIR / "flight_points.parquet")
-    subpaths = pd.read_parquet(OUT_DIR / "subpaths.parquet")
-    corridors = pd.read_parquet(OUT_DIR / "corridors.parquet")
+def items_in_corridors(out_dir: Path, min_n_flights: int) -> list[str]:
+    points = pd.read_parquet(out_dir / "flight_points.parquet")
+    subpaths = pd.read_parquet(out_dir / "subpaths.parquet")
+    corridors = pd.read_parquet(out_dir / "corridors.parquet")
     qualifying = set(corridors[corridors["n_flights"] >= min_n_flights]["corridor_id"])
     sid_to_corr = dict(zip(subpaths["sub_id"], subpaths["corridor_id"]))
     points["corridor_id"] = points["sub_id"].map(sid_to_corr).fillna(-2).astype(int)
@@ -109,10 +107,10 @@ def along_track_extract(meta: dict, downsample_m: float, item_id: str) -> pd.Dat
     })
 
 
-def cached_or_fetch(item, force: bool, downsample_m: float):
+def cached_or_fetch(item, cache_dir: Path, force: bool, downsample_m: float):
     """Return (item_id, status, err) where status is 'cached' | 'fetched' | 'skipped' | 'failed'."""
     item_id = item["id"]
-    cache_path = CACHE_DIR / f"{item_id}.parquet"
+    cache_path = cache_dir / f"{item_id}.parquet"
     if cache_path.exists() and not force:
         return item_id, "cached", None
     assets = item["assets"]
@@ -131,15 +129,20 @@ def cached_or_fetch(item, force: bool, downsample_m: float):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--region", default="Greenland")
+    parser.add_argument("--region", choices=["Greenland", "Antarctica"],
+                        default="Greenland")
     parser.add_argument("--min-flights", type=int, default=5)
     parser.add_argument("--workers", type=int, default=N_WORKERS)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
+    out_dir = OUT_ROOT / args.region.lower()
+    cache_dir = out_dir / "altitudes"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Selecting frames in {args.region} corridors (>= {args.min_flights} flights)...")
-    target_ids = set(items_in_corridors(args.min_flights))
+    target_ids = set(items_in_corridors(out_dir, args.min_flights))
     print(f"  {len(target_ids):,} frames in qualifying corridors")
 
     print("Loading STAC items...")
@@ -155,7 +158,7 @@ def main():
     t0 = time.time()
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futures = [ex.submit(cached_or_fetch, row, args.force, DOWNSAMPLE_M)
+        futures = [ex.submit(cached_or_fetch, row, cache_dir, args.force, DOWNSAMPLE_M)
                    for _, row in catalog.iterrows()]
         for i, fut in enumerate(as_completed(futures), 1):
             item_id, status, err = fut.result()
@@ -184,10 +187,10 @@ def main():
             print(f"  {f[0]}: {f[1]}")
 
     print("Concatenating cache files...")
-    dfs = [pd.read_parquet(p) for p in CACHE_DIR.glob("*.parquet")]
+    dfs = [pd.read_parquet(p) for p in cache_dir.glob("*.parquet")]
     if dfs:
         big = pd.concat(dfs, ignore_index=True)
-        out = OUT_DIR / "altitudes.parquet"
+        out = out_dir / "altitudes.parquet"
         big.to_parquet(out, index=False)
         print(f"Wrote {out}: {len(big):,} rows, {big['item_id'].nunique()} items")
 
