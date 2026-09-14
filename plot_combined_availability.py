@@ -9,13 +9,12 @@ Three categories: "Open access to raw data" (xOPR), "Commitment to release"
 import argparse
 from pathlib import Path
 
-import duckdb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xopr
-from pyproj import Geod
-from shapely import wkt
+
+from bedmap_common import geod_km, load_bedmap_catalog
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--haps", action="store_true",
@@ -31,62 +30,12 @@ SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
-# Excluded BedMap datasets (scattered points, not reliable flight lines)
-EXCLUDE_NAMES = {
-    "RNRF_2008_Vostok-Subglacial-Lake_AIR_BM2",
-    "CRESIS_2009_Thwaites_AIR_BM3",
-}
-
-
-def geod_km_wkt(geometry_wkt):
-    """Geodesic length of a WKT geometry in km."""
-    geom = wkt.loads(geometry_wkt)
-    geod = Geod(ellps="WGS84")
-    total = 0.0
-    lines = geom.geoms if hasattr(geom, "geoms") else [geom]
-    for line in lines:
-        coords = list(line.coords)
-        for i in range(len(coords) - 1):
-            _, _, d = geod.inv(coords[i][0], coords[i][1],
-                               coords[i + 1][0], coords[i + 1][1])
-            total += d
-    return total / 1000.0
-
-
-def geod_km(geometry):
-    """Geodesic length of a shapely geometry in km."""
-    if geometry is None or geometry.is_empty:
-        return 0.0
-    geod = Geod(ellps="WGS84")
-    coords = list(geometry.coords)
-    total = 0.0
-    for i in range(len(coords) - 1):
-        _, _, d = geod.inv(coords[i][0], coords[i][1],
-                           coords[i + 1][0], coords[i + 1][1])
-        total += d
-    return total / 1000.0
-
-
 # --- BedMap line-km per year (2000-2020) --- (Antarctic only, skip for Greenland)
 if not args.greenland:
     print("Querying BedMap catalogs...")
-    conn = duckdb.connect()
-    conn.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
-    urls = [f"https://data.source.coop/englacial/bedmap/bedmap{v}.parquet" for v in [2, 3]]
-    query = " UNION ALL ".join(
-        f"SELECT ST_AsText(geometry) as geom_wkt, name, "
-        f"temporal_start, temporal_end FROM read_parquet('{u}')" for u in urls
-    )
-    bm = conn.execute(query).fetchdf()
-    conn.close()
-
-    bm = bm[~bm["name"].isin(EXCLUDE_NAMES)]
-    bm["base_name"] = bm["name"].str.replace(r"_BM[123]$", "", regex=True)
-    bm = bm.sort_values("name").drop_duplicates(subset="base_name", keep="last")
-    bm["line_km"] = bm["geom_wkt"].apply(geod_km_wkt)
-    bm["ts"] = pd.to_datetime(bm["temporal_start"], format="ISO8601")
-    bm["te"] = pd.to_datetime(bm["temporal_end"], format="ISO8601", errors="coerce")
-    bm["te"] = bm["te"].fillna(bm["ts"])
+    # Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
+    bm = load_bedmap_catalog(["bedmap2", "bedmap3"])
+    bm["line_km"] = bm["geometry"].apply(geod_km)
 
     bm_rows = []
     for _, r in bm.iterrows():

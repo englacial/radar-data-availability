@@ -88,7 +88,12 @@ def load_bedmap(epsg, max_point_spacing_m=1000, local_cache=True):
     df = query_bedmap(collections=["bedmap1", "bedmap2", "bedmap3"],
                       columns=["lon", "lat", "source_file", "row"],
                       local_cache=local_cache, show_progress=True)
-    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files")
+    # Drop excluded campaigns and BM2/BM3 duplicates (see bedmap_common)
+    from bedmap_common import kept_source_files
+    n_files = df["source_file"].nunique()
+    df = df[df["source_file"].isin(kept_source_files(["bedmap1", "bedmap2", "bedmap3"]))]
+    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files "
+          f"({n_files - df['source_file'].nunique()} excluded or duplicate files dropped)")
     df = df.sort_values(["source_file", "row"])
     xs, ys = tf.transform(df["lon"].values, df["lat"].values)
     # Mask transitions between files so we don't connect unrelated points

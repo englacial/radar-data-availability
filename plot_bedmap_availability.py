@@ -8,11 +8,10 @@ distributing multi-year campaigns evenly across their span.
 
 from pathlib import Path
 
-import duckdb
 import matplotlib.pyplot as plt
 import pandas as pd
-from pyproj import Geod
-from shapely import wkt
+
+from bedmap_common import geod_km, load_bedmap_catalog
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "outputs"
@@ -33,12 +32,6 @@ COUNTRY_COLORS = {
 }
 COUNTRY_ORDER = ["Other", "China", "Russia", "Germany", "UK", "USA"]
 
-# Excluded datasets (scattered points, not reliable flight lines)
-EXCLUDE_NAMES = {
-    "RNRF_2008_Vostok-Subglacial-Lake_AIR_BM2",
-    "CRESIS_2009_Thwaites_AIR_BM3",
-}
-
 
 def institution_to_country(name):
     """Map campaign name prefix to country."""
@@ -46,43 +39,10 @@ def institution_to_country(name):
     return COUNTRY_MAP.get(prefix, "Other")
 
 
-def line_km(geometry_wkt):
-    """Calculate geodesic length of a WKT line geometry in km."""
-    geom = wkt.loads(geometry_wkt)
-    geod = Geod(ellps="WGS84")
-    total = 0.0
-    lines = geom.geoms if hasattr(geom, "geoms") else [geom]
-    for line in lines:
-        coords = list(line.coords)
-        for i in range(len(coords) - 1):
-            _, _, d = geod.inv(coords[i][0], coords[i][1],
-                               coords[i + 1][0], coords[i + 1][1])
-            total += d
-    return total / 1000.0
-
-
-# Query bedmap2 and bedmap3 catalogs (skip bedmap1, matching reference)
-conn = duckdb.connect()
-conn.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
-urls = [f"https://data.source.coop/englacial/bedmap/bedmap{v}.parquet" for v in [2, 3]]
-query = " UNION ALL ".join(
-    f"SELECT ST_AsText(geometry) as geom_wkt, name, "
-    f"temporal_start, temporal_end FROM read_parquet('{u}')" for u in urls
-)
-df = conn.execute(query).fetchdf()
-conn.close()
-
-# Exclude problematic datasets
-df = df[~df["name"].isin(EXCLUDE_NAMES)]
-
-# Deduplicate: keep BM3 over BM2 for campaigns in both catalogs
-df["base_name"] = df["name"].str.replace(r"_BM[123]$", "", regex=True)
-df = df.sort_values("name").drop_duplicates(subset="base_name", keep="last")
-
-# Calculate line-km
-df["line_km"] = df["geom_wkt"].apply(line_km)
-df["ts"] = pd.to_datetime(df["temporal_start"], format="ISO8601")
-df["te"] = pd.to_datetime(df["temporal_end"], format="ISO8601")
+# Query bedmap2 and bedmap3 catalogs (skip bedmap1, matching reference).
+# Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
+df = load_bedmap_catalog(["bedmap2", "bedmap3"])
+df["line_km"] = df["geometry"].apply(geod_km)
 
 # Distribute every campaign evenly across its year range (matching reference)
 rows = []
