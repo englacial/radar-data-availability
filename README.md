@@ -18,6 +18,12 @@ Or edit `pyproject.toml` to point `xopr` at your local path.
 
 ## Entry points
 
+All BedMap consumers share `bedmap_common.py`, which applies the campaign
+exclusion list, keeps one version of campaigns present in both BedMap2 and
+BedMap3, and parses temporal metadata (a missing or year-9999 end date falls
+back to the start date). Change those rules there, not in individual plots.
+
+
 ### `plot_combined_availability.py`
 
 Stacked bar chart comparing data availability across BedMap and xOPR by year (2001–2023). Categorizes data as open access (xOPR), committed to release, or not released.
