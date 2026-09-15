@@ -37,7 +37,7 @@ COUNTRY_COLORS = {
     "USA": "tab:blue", "UK": "tab:green", "Germany": "tab:orange",
     "Russia": "tab:red", "China": "tab:purple", "Other": "gray",
 }
-COUNTRY_ORDER = ["Other", "China", "Russia", "Germany", "UK", "USA"]
+COUNTRY_ORDER = ["USA", "UK", "Germany", "Russia", "China", "Other"]  # bottom to top
 
 
 def institution_to_country(name):
