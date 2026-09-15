@@ -12,7 +12,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from bedmap_common import campaign_years, geod_km, load_bedmap_catalog
+from bedmap_common import campaign_years, load_bedmap_catalog
 from extra_sources import load_extra_campaigns
 
 SCRIPT_DIR = Path(__file__).parent
@@ -42,9 +42,8 @@ def institution_to_country(name):
 
 
 # Query bedmap2 and bedmap3 catalogs (skip bedmap1, matching reference).
-# Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
+# Exclusions, dedup, date parsing and gap-filtered line-km live in bedmap_common.
 df = load_bedmap_catalog(["bedmap2", "bedmap3"])
-df["line_km"] = df["geometry"].apply(geod_km)
 df = pd.concat([df, load_extra_campaigns()], ignore_index=True)
 
 # Distribute every campaign evenly across its years (see campaign_years)

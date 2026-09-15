@@ -38,7 +38,6 @@ if not args.greenland:
     print("Querying BedMap catalogs...")
     # Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
     bm = load_bedmap_catalog(["bedmap2", "bedmap3"])
-    bm["line_km"] = bm["geometry"].apply(geod_km)
     bm = pd.concat([bm, load_extra_campaigns()], ignore_index=True)
 
     bm_rows = []

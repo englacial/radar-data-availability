@@ -6,11 +6,21 @@ temporal metadata fixes are applied in exactly one place.
 """
 
 import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from pyproj import Geod
+from pyproj import Geod, Transformer
 from xopr.bedmap.query import query_bedmap_catalog
+
+# Consecutive BedMap points further apart than this are not joined into a
+# flight line. Applied to the density grids and to the per-campaign line-km
+# used by the bar charts. 1.5 km keeps the airborne surveys sampled near 1 km
+# (SOAR-LVS-WLK, CASERTZ, MAMOG: 95th-percentile spacing <= 1.35 km) and still
+# drops ground traverses and the 25 km-spaced GANOVEX files (p95 >= 6.5 km);
+# see claude_notes/bedmap_gap_rule_options.csv.
+MAX_POINT_SPACING_M = 1500
+CAMPAIGN_KM_FILE = Path(__file__).parent / "bedmap_campaign_km.csv"
 
 # Campaigns dropped everywhere. CRESIS_2009_Thwaites is a MUSIC swath product
 # (~30 cross-track bed picks per radar record) and the Vostok file is scattered
@@ -60,8 +70,11 @@ def load_bedmap_catalog(collections=("bedmap2", "bedmap3"), exclude=True):
     metadata into ``ts``/``te``. A missing or sentinel end date (e.g. year
     9999) falls back to the start date.
 
+    ``line_km`` is the gap-filtered length of the campaign's point data
+    (see ``campaign_point_km``), not the simplified catalog geometry.
+
     Columns: collection, geometry, name, base_name, institution,
-    temporal_start, temporal_end, ts, te.
+    temporal_start, temporal_end, ts, te, line_km.
     """
     cat = query_bedmap_catalog(collections=list(collections))
     props = pd.DataFrame(cat["properties"].tolist(), index=cat.index)
@@ -81,7 +94,58 @@ def load_bedmap_catalog(collections=("bedmap2", "bedmap3"), exclude=True):
     te = pd.to_datetime(df["temporal_end"], format="ISO8601", errors="coerce")
     bad_end = te.isna() | (te.dt.year > 2100)
     df["te"] = te.where(~bad_end, df["ts"])
+    km = campaign_point_km()
+    missing = df.loc[~df["name"].isin(km.index), "name"].tolist()
+    if missing:
+        print(f"bedmap_common: no point-based km for {missing}; using catalog geometry")
+    df["line_km"] = df["name"].map(km).fillna(df["geometry"].apply(geod_km))
     return df.reset_index(drop=True)
+
+
+def load_bedmap_points(collections=("bedmap1", "bedmap2", "bedmap3"), local_cache=True):
+    """Kept BedMap points (lon, lat, source_file, row) sorted along track."""
+    from xopr.bedmap import fetch_bedmap, query_bedmap
+    fetch_bedmap()
+    df = query_bedmap(collections=list(collections),
+                      columns=["lon", "lat", "source_file", "row"],
+                      local_cache=local_cache, show_progress=True)
+    n_files = df["source_file"].nunique()
+    df = df[df["source_file"].isin(kept_source_files(collections))]
+    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files "
+          f"({n_files - df['source_file'].nunique()} excluded or duplicate files dropped)")
+    return df.sort_values(["source_file", "row"])
+
+
+def point_segments(df, epsg="EPSG:3031", max_point_spacing_m=MAX_POINT_SPACING_M):
+    """Segments between consecutive points of one file, shorter than the gap limit.
+
+    Returns x1, y1, x2, y2 in ``epsg`` plus the segment lengths in geodesic
+    km and the source_file of each segment.
+    """
+    tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
+    lon, lat = df["lon"].to_numpy(), df["lat"].to_numpy()
+    xs, ys = tf.transform(lon, lat)
+    same_file = df["source_file"].to_numpy()[:-1] == df["source_file"].to_numpy()[1:]
+    dists = np.hypot(np.diff(xs), np.diff(ys))
+    ok = same_file & (dists < max_point_spacing_m) & (dists > 0)
+    km = _GEOD.inv(lon[:-1][ok], lat[:-1][ok], lon[1:][ok], lat[1:][ok])[2] / 1000.0
+    return xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok], km, df["source_file"].to_numpy()[:-1][ok]
+
+
+def campaign_point_km(rebuild=False):
+    """Gap-filtered line-km per BedMap file, from ``bedmap_campaign_km.csv``.
+
+    The table is rebuilt from the point data (all three BedMap versions,
+    ~90M points, needs the point cache) when missing or ``rebuild`` is set;
+    run ``python bedmap_common.py`` to refresh it after changing the rules.
+    """
+    if CAMPAIGN_KM_FILE.exists() and not rebuild:
+        return pd.read_csv(CAMPAIGN_KM_FILE, index_col="name")["line_km"]
+    df = load_bedmap_points()
+    *_, seg_km, files = point_segments(df)
+    km = pd.Series(seg_km).groupby(files).sum().rename("line_km").rename_axis("name")
+    km.to_csv(CAMPAIGN_KM_FILE)
+    return km
 
 
 def dropped_names():
@@ -108,7 +172,17 @@ def kept_source_files(collections=("bedmap1", "bedmap2", "bedmap3")):
 
     ``source_file`` in the point parquet files matches the catalog ``name``.
     """
-    return set(load_bedmap_catalog(collections)["name"])
+    return set(_catalog_names(collections))
+
+
+def _catalog_names(collections):
+    """Kept catalog names (exclusions + version dedup) without the km table."""
+    cat = query_bedmap_catalog(collections=list(collections))
+    df = pd.DataFrame({"name": [p["name"] for p in cat["properties"]]})
+    df = df[~df["name"].isin(dropped_names())
+            & ~df["name"].str.startswith(EXTERNAL_SOURCE_PREFIXES)]
+    df["base"] = df["name"].str.replace(_VERSION_SUFFIX, "", regex=True)
+    return df.sort_values("name").drop_duplicates("base", keep="last")["name"]
 
 
 def geod_km(geometry):
@@ -121,3 +195,8 @@ def geod_km(geometry):
         if len(c) > 1:
             total += _GEOD.inv(c[:-1, 0], c[:-1, 1], c[1:, 0], c[1:, 1])[2].sum()
     return total / 1000.0
+
+
+if __name__ == "__main__":
+    km = campaign_point_km(rebuild=True)
+    print(f"wrote {CAMPAIGN_KM_FILE}: {len(km)} files, {km.sum():,.0f} km")
