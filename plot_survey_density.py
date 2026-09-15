@@ -67,15 +67,16 @@ ZOOM_REGIONS = {
 }
 
 
-def load_bedmap(epsg, max_point_spacing_m=1000, local_cache=True, include_extra=True):
-    """Load BedMap point data (plus extra_sources tracks) as projected segment endpoints.
+def load_bedmap(epsg, local_cache=True, include_extra=True):
+    """BedMap point data (plus extra_sources tracks) as projected segment endpoints.
+
+    Uses the shared gap rule in ``bedmap_common`` (``MAX_POINT_SPACING_M``), so
+    the grids and the bar charts count the same line-km.
 
     Parameters
     ----------
     epsg : str
         Target CRS (e.g. "EPSG:3031").
-    max_point_spacing_m : float
-        Discard segments longer than this (gap between survey points).
     include_extra : bool
         Append the direct-source tracks from extra_sources (AWI, KOPRI, xOPR
         substitutes), which replace the corresponding BedMap files.
@@ -85,25 +86,9 @@ def load_bedmap(epsg, max_point_spacing_m=1000, local_cache=True, include_extra=
     x1, y1, x2, y2 : np.ndarray
         Segment endpoint arrays in the target CRS.
     """
-    from xopr.bedmap import query_bedmap, fetch_bedmap
-    tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
-    fetch_bedmap()
-    df = query_bedmap(collections=["bedmap1", "bedmap2", "bedmap3"],
-                      columns=["lon", "lat", "source_file", "row"],
-                      local_cache=local_cache, show_progress=True)
-    # Drop excluded campaigns and BM2/BM3 duplicates (see bedmap_common)
-    from bedmap_common import kept_source_files
-    n_files = df["source_file"].nunique()
-    df = df[df["source_file"].isin(kept_source_files(["bedmap1", "bedmap2", "bedmap3"]))]
-    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files "
-          f"({n_files - df['source_file'].nunique()} excluded or duplicate files dropped)")
-    df = df.sort_values(["source_file", "row"])
-    xs, ys = tf.transform(df["lon"].values, df["lat"].values)
-    # Mask transitions between files so we don't connect unrelated points
-    same_file = df["source_file"].values[:-1] == df["source_file"].values[1:]
-    dists = np.sqrt(np.diff(xs)**2 + np.diff(ys)**2)
-    ok = same_file & (dists < max_point_spacing_m) & (dists > 0)
-    segs = [xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok]]
+    from bedmap_common import load_bedmap_points, point_segments
+    df = load_bedmap_points(local_cache=local_cache)
+    segs = list(point_segments(df, epsg)[:4])
     if include_extra:
         from extra_sources import extra_segments
         ex = extra_segments(epsg)

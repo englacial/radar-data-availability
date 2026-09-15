@@ -20,9 +20,14 @@ Or edit `pyproject.toml` to point `xopr` at your local path.
 
 All BedMap consumers share `bedmap_common.py`, which applies the campaign
 exclusion list, drops BM2 files superseded by renamed BM3 files, keeps one
-version of campaigns present in both BedMap2 and BedMap3, and parses temporal
-metadata (a missing or year-9999 end date falls back to the start date).
-Change those rules there, not in individual plots.
+version of campaigns present in both BedMap2 and BedMap3, parses temporal
+metadata (a missing or year-9999 end date falls back to the start date), and
+defines the gap rule (`MAX_POINT_SPACING_M`, 1.5 km) that decides which
+consecutive points form a flight line. Per-campaign line-km for the bar
+charts come from that rule applied to the point data, stored in
+`bedmap_campaign_km.csv` (rebuild with `uv run python bedmap_common.py`
+after changing the rules; needs the point cache), not from the simplified
+catalog geometry. Change those rules there, not in individual plots.
 
 Direct provider sources live in `extra_sources.py` and are added to every
 BedMap-based figure (bar charts, survey density, coastal gaps; `--no-extra`
