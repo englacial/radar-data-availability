@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Stacked bar chart of BedMap line-km per year, colored by country.
 
-Recreates the reference figure from the BedMap STAC catalog data.
-Uses campaign name years from temporal_start/temporal_end metadata,
-distributing multi-year campaigns evenly across their span.
+Recreates the reference figure from the BedMap STAC catalog data, plus the
+direct sources in extra_sources (AWI tracks, KOPRI helicopter surveys, xOPR
+substitutes). BedMap campaigns are spread evenly over their
+temporal_start..temporal_end calendar years; dated sources go to their season.
 """
 
 from pathlib import Path
@@ -11,7 +12,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from bedmap_common import geod_km, load_bedmap_catalog
+from bedmap_common import campaign_years, geod_km, load_bedmap_catalog
+from extra_sources import load_extra_campaigns
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "outputs"
@@ -43,24 +45,24 @@ def institution_to_country(name):
 # Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
 df = load_bedmap_catalog(["bedmap2", "bedmap3"])
 df["line_km"] = df["geometry"].apply(geod_km)
+df = pd.concat([df, load_extra_campaigns()], ignore_index=True)
 
-# Distribute every campaign evenly across its year range (matching reference)
+# Distribute every campaign evenly across its years (see campaign_years)
 rows = []
 for _, r in df.iterrows():
-    y_start, y_end = r["ts"].year, r["te"].year
-    n_years = y_end - y_start + 1
+    years = campaign_years(r)
     country = institution_to_country(r["name"])
-    for y in range(y_start, y_end + 1):
-        rows.append({"year": y, "line_km": r["line_km"] / n_years,
+    for y in years:
+        rows.append({"year": y, "line_km": r["line_km"] / len(years),
                      "country": country})
 
 result = pd.DataFrame(rows)
-result = result[(result["year"] >= 2000) & (result["year"] <= 2020)]
+result = result[(result["year"] >= 2000) & (result["year"] <= 2025)]
 
 # Pivot: line-km per year per country, ensure all years present
 pivot = result.pivot_table(index="year", columns="country", values="line_km",
                            aggfunc="sum", fill_value=0)
-pivot = pivot.reindex(range(2000, 2021), fill_value=0)
+pivot = pivot.reindex(range(2000, 2026), fill_value=0)
 pivot = pivot.reindex(columns=[c for c in COUNTRY_ORDER if c in pivot.columns])
 
 # Plot

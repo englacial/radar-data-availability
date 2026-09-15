@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Combined figure: BedMap vs xOPR data availability.
 
-For 2000-2019, xOPR data is a subset of BedMap. For 2020+, only xOPR exists.
-Three categories: "Open access to raw data" (xOPR), "Commitment to release"
-(AWI all years + UTIG 2008+), and "Raw data not released" (remainder).
+Totals come from the BedMap catalog plus the direct sources in extra_sources
+(AWI tracks, KOPRI helicopter surveys, xOPR substitutes). Three categories:
+"Open access to raw data" (xOPR), "Commitment to release" (AWI all years,
+including data released outside xOPR, + UTIG 2008+), and "Raw data not
+released" (remainder, including the KOPRI helicopter data).
 """
 
 import argparse
@@ -14,7 +16,8 @@ import numpy as np
 import pandas as pd
 import xopr
 
-from bedmap_common import geod_km, load_bedmap_catalog
+from bedmap_common import campaign_years, geod_km, load_bedmap_catalog
+from extra_sources import load_extra_campaigns
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--haps", action="store_true",
@@ -36,25 +39,31 @@ if not args.greenland:
     # Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
     bm = load_bedmap_catalog(["bedmap2", "bedmap3"])
     bm["line_km"] = bm["geometry"].apply(geod_km)
+    bm = pd.concat([bm, load_extra_campaigns()], ignore_index=True)
 
     bm_rows = []
     for _, r in bm.iterrows():
-        y_start, y_end = r["ts"].year, r["te"].year
-        n_years = y_end - y_start + 1
+        years = campaign_years(r)
         prefix = r["name"].split("_")[0]
-        committed = prefix == "AWI" or (prefix == "UTIG" and y_start >= 2008)
-        for y in range(y_start, y_end + 1):
-            bm_rows.append({"year": y, "line_km": r["line_km"] / n_years,
-                             "committed": committed})
+        committed = (r.get("access") == "committed" or prefix == "AWI"
+                     or (prefix == "UTIG" and years[0] >= 2008))
+        # Data that OPR may also host (CReSIS/NASA, UTIG, substituted xOPR
+        # collections) is reconciled against the xOPR total below; other
+        # providers' data is never in xOPR and is added on top.
+        in_opr_pool = prefix in ("NASA", "CRESIS", "UTIG") or r.get("source") == "opr"
+        for y in years:
+            bm_rows.append({"year": y, "line_km": r["line_km"] / len(years),
+                             "committed": committed, "pool": in_opr_pool})
 
     bm_df = pd.DataFrame(bm_rows)
-    bedmap_yearly = (bm_df.groupby("year")["line_km"].sum()
-                     .reindex(range(2001, 2024), fill_value=0))
-    committed_yearly = (bm_df[bm_df["committed"]].groupby("year")["line_km"].sum()
-                        .reindex(range(2001, 2024), fill_value=0))
+    _yr = lambda d: d.groupby("year")["line_km"].sum().reindex(range(2001, 2026), fill_value=0)
+    pool_yearly = _yr(bm_df[bm_df["pool"]])
+    other_yearly = _yr(bm_df[~bm_df["pool"]])
+    committed_yearly = _yr(bm_df[bm_df["committed"]])
 else:
-    bedmap_yearly = pd.Series(0, index=range(2001, 2024))
-    committed_yearly = pd.Series(0, index=range(2001, 2024))
+    pool_yearly = pd.Series(0, index=range(2001, 2026))
+    other_yearly = pd.Series(0, index=range(2001, 2026))
+    committed_yearly = pd.Series(0, index=range(2001, 2026))
 
 # --- xOPR line-km per year (Antarctic + Greenland) ---
 print("Querying xOPR catalog...")
@@ -82,19 +91,21 @@ for cid in all_ids:
 
 def _yearly_sum(rows):
     if not rows:
-        return pd.Series(0, index=range(2001, 2024), dtype=float)
+        return pd.Series(0, index=range(2001, 2026), dtype=float)
     return (pd.DataFrame(rows).groupby("year")["line_km"].sum()
-            .reindex(range(2001, 2024), fill_value=0))
+            .reindex(range(2001, 2026), fill_value=0))
 
 opr_yearly = _yearly_sum(opr_rows)
 # Greenland xOPR data is not in BedMap, so add it to the BedMap total
 greenland_yearly = _yearly_sum(greenland_rows)
 
 # --- Combine: open access / commitment / not released ---
-# Greenland xOPR is additional to BedMap (Antarctic only), so add it to totals
-years = np.arange(2001, 2024)
+# Antarctic xOPR data overlaps the CReSIS/NASA/UTIG pool, so take the larger of
+# the two; providers outside OPR (AWI, BAS, ...) and Greenland xOPR add on top.
+years = np.arange(2001, 2026)
 open_km = opr_yearly.values
-total_km = np.maximum(bedmap_yearly.values + greenland_yearly.values, open_km)
+total_km = (np.maximum(pool_yearly.values, open_km - greenland_yearly.values)
+            + other_yearly.values + greenland_yearly.values)
 # Committed data not yet in xOPR (cap at remaining BedMap after removing xOPR)
 remaining = total_km - open_km
 commit_km = np.minimum(committed_yearly.values, remaining)

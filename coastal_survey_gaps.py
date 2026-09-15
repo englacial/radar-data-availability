@@ -447,6 +447,8 @@ def main():
     )
     p.add_argument('--source', choices=['bedmap', 'bedmap_local', 'xopr'],
                    default='bedmap_local')
+    p.add_argument('--no-extra', action='store_true',
+                   help='Do not add extra_sources tracks to the BedMap sources')
     p.add_argument('--grid-km', type=float, default=30)
     p.add_argument('--coast-dist-km', type=float, default=20,
                    help='Max distance from coastline [km]')
@@ -475,9 +477,9 @@ def main():
     # Load survey data
     print(f'Loading {args.source} data...')
     if args.source == 'bedmap':
-        x1, y1, x2, y2 = load_bedmap(reg['epsg'], local_cache=False)
+        x1, y1, x2, y2 = load_bedmap(reg['epsg'], local_cache=False, include_extra=not args.no_extra)
     elif args.source == 'bedmap_local':
-        x1, y1, x2, y2 = load_bedmap(reg['epsg'], local_cache=True)
+        x1, y1, x2, y2 = load_bedmap(reg['epsg'], local_cache=True, include_extra=not args.no_extra)
     else:
         geoms = load_xopr(region_filter='Antarctica')
         x1, y1, x2, y2 = extract_segments(geoms, reg['epsg'])
