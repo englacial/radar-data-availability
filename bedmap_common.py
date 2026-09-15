@@ -57,6 +57,13 @@ OPR_SUBSTITUTIONS = {
 # instead of their BedMap submissions.
 EXTERNAL_SOURCE_PREFIXES = ("AWI_",)
 
+# Files whose catalog dates are known to be wrong: name -> (start, end).
+# UTIG_1999_SOAR-LVS-WLK bundles the SOAR surveys of 1996-2001 (TAM/PPT,
+# WLK, BSB, IRE, WAZ/TKD, LVS; USAP-DC 601588) under a 1999-2000 placeholder.
+TEMPORAL_OVERRIDES = {
+    "UTIG_1999_SOAR-LVS-WLK_AIR_BM2": ("1996-01-01", "2001-12-31"),
+}
+
 _VERSION_SUFFIX = re.compile(r"_BM[123]$")
 _GEOD = Geod(ellps="WGS84")
 
@@ -68,7 +75,8 @@ def load_bedmap_catalog(collections=("bedmap2", "bedmap3"), exclude=True):
     ``EXTERNAL_SOURCE_PREFIXES``, keeps the newest BedMap version when a
     campaign appears in several (BM3 over BM2 over BM1), and parses temporal
     metadata into ``ts``/``te``. A missing or sentinel end date (e.g. year
-    9999) falls back to the start date.
+    9999) falls back to the start date; ``TEMPORAL_OVERRIDES`` replaces known
+    bad ranges.
 
     ``line_km`` is the gap-filtered length of the campaign's point data
     (see ``campaign_point_km``), not the simplified catalog geometry.
@@ -94,6 +102,8 @@ def load_bedmap_catalog(collections=("bedmap2", "bedmap3"), exclude=True):
     te = pd.to_datetime(df["temporal_end"], format="ISO8601", errors="coerce")
     bad_end = te.isna() | (te.dt.year > 2100)
     df["te"] = te.where(~bad_end, df["ts"])
+    for name, (start, end) in TEMPORAL_OVERRIDES.items():
+        df.loc[df["name"] == name, ["ts", "te"]] = [pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")]
     km = campaign_point_km()
     missing = df.loc[~df["name"].isin(km.index), "name"].tolist()
     if missing:
