@@ -21,7 +21,8 @@ Or edit `pyproject.toml` to point `xopr` at your local path.
 All BedMap consumers share `bedmap_common.py`, which applies the campaign
 exclusion list, drops BM2 files superseded by renamed BM3 files, keeps one
 version of campaigns present in both BedMap2 and BedMap3, parses temporal
-metadata (a missing or year-9999 end date falls back to the start date), and
+metadata (a missing or year-9999 end date falls back to the start date;
+`TEMPORAL_OVERRIDES` fixes known bad ranges such as the SOAR 1996-2001 file), and
 defines the gap rule (`MAX_POINT_SPACING_M`, 1.5 km) that decides which
 consecutive points form a flight line. Per-campaign line-km for the bar
 charts come from that rule applied to the point data, stored in
