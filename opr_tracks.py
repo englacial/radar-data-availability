@@ -10,7 +10,6 @@ track lengths with the BedMap files they replace or duplicate.
 """
 
 import re
-import urllib.request
 from pathlib import Path
 
 import geopandas as gpd
@@ -28,10 +27,8 @@ _GEOD = Geod(ellps="WGS84")
 
 
 def _fetch(url, path):
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, path)
-    return path
+    from extra_sources import _fetch as fetch  # shared retrying download
+    return fetch(url, path)
 
 
 def list_segment_csvs(collection):
