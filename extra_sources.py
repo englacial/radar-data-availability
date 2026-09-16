@@ -13,6 +13,8 @@ plus ``source``, ``season`` (July-June start year), ``access`` and
 Raw downloads are cached under ``radar_cache/`` (gitignored).
 """
 
+import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -24,9 +26,9 @@ from pyproj import Transformer
 from bedmap_common import geod_km
 
 CACHE = Path(__file__).parent / "radar_cache"
-AWI_WFS = ("https://maps.awi.de/services/common/radar/ows?service=WFS&version=2.0.0"
-           "&request=GetFeature&typeNames=radar:tracks_3031&outputFormat=application/json")
+AWI_WFS = "https://maps.awi.de/services/common/radar/ows"
 AWI_SOUNDERS = {"EMR", "UWB", "UWBM"}  # ACCU/SNOW/ASIRAS are accumulation radars
+AWI_PAGE = 2000  # features per WFS request; the full layer in one response gets cut off
 AWI_GENERIC_DOI = "10.1594/PANGAEA.972094"  # collection bibliography, not a dataset release
 QICERADAR_GPKG = "https://zenodo.org/api/records/21964546/files/qiceradar_antarctic_index.gpkg/content"
 # KOPRI Araon cruises are annual and visit Thwaites every other year (last
@@ -34,10 +36,21 @@ QICERADAR_GPKG = "https://zenodo.org/api/records/21964546/files/qiceradar_antarc
 KOPRI_SEASONS = {"ASE2": 2017, "ASE3": 2019, "ASE4": 2021, "ASE5": 2023, "ASE6": 2025}
 
 
-def _fetch(url, path):
+def _fetch(url, path, attempts=4):
+    """Download ``url`` to ``path`` unless present; retry on truncated responses."""
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, path)
+        tmp = path.with_suffix(path.suffix + ".part")
+        for i in range(attempts):
+            try:
+                urllib.request.urlretrieve(url, tmp)
+                tmp.rename(path)
+                break
+            except Exception as e:  # noqa: BLE001 - network errors of any kind
+                if i == attempts - 1:
+                    raise
+                print(f"  retrying {url.split('?')[0]} after {type(e).__name__}")
+                time.sleep(5 * (i + 1))
     return path
 
 
@@ -46,11 +59,28 @@ def _season(ts):
 
 
 def load_awi_tracks():
-    """All features of the AWI WFS layer (EPSG:3031) with ``km`` added; cached as parquet."""
-    pq = CACHE / "awi" / "tracks_3031.parquet"
+    """AWI ice-sounder features of the WFS layer (EPSG:3031) with ``km``; cached as parquet.
+
+    Fetched in pages of ``AWI_PAGE`` with a server-side filter on
+    ``radar_system`` (the layer also holds BAS, CReSIS and UTIG data).
+    """
+    pq = CACHE / "awi" / "tracks_3031_sounders.parquet"
     if pq.exists():
         return gpd.read_parquet(pq)
-    g = gpd.read_file(_fetch(AWI_WFS, CACHE / "awi" / "tracks_3031.geojson")).set_crs(3031, allow_override=True)
+    cql = "radar_system IN (" + ",".join(f"'{r}'" for r in sorted(AWI_SOUNDERS)) + ")"
+    pages, start = [], 0
+    while True:
+        q = urllib.parse.urlencode({"service": "WFS", "version": "2.0.0", "request": "GetFeature",
+                                    "typeNames": "radar:tracks_3031", "outputFormat": "application/json",
+                                    "sortBy": "fid", "count": AWI_PAGE, "startIndex": start, "CQL_FILTER": cql})
+        page = gpd.read_file(_fetch(f"{AWI_WFS}?{q}", CACHE / "awi" / f"sounders_{start:06d}.geojson"))
+        if len(page) == 0:
+            break
+        pages.append(page)
+        start += AWI_PAGE
+        if len(page) < AWI_PAGE:
+            break
+    g = pd.concat(pages, ignore_index=True).set_crs(3031, allow_override=True)
     g = g[g.geom_type.isin(["LineString", "MultiLineString"])].copy()
     g["km"] = g.to_crs(4326)["geometry"].apply(geod_km)
     g.to_parquet(pq)
