@@ -71,7 +71,9 @@ def load_bedmap(epsg, local_cache=True, include_extra=True):
     """BedMap point data (plus extra_sources tracks) as projected segment endpoints.
 
     Uses the shared gap rule in ``bedmap_common`` (``MAX_POINT_SPACING_M``), so
-    the grids and the bar charts count the same line-km.
+    the grids and the bar charts count the same line-km. Point files are
+    always read from the local cache (``radar_cache/bedmap/``), fetching any
+    that are missing; ``local_cache`` is kept for CLI compatibility.
 
     Parameters
     ----------
@@ -86,14 +88,14 @@ def load_bedmap(epsg, local_cache=True, include_extra=True):
     x1, y1, x2, y2 : np.ndarray
         Segment endpoint arrays in the target CRS.
     """
-    from bedmap_common import load_bedmap_points, point_segments
-    df = load_bedmap_points(local_cache=local_cache)
-    segs = list(point_segments(df, epsg)[:4])
+    from bedmap_common import bedmap_segments
+    segs, _ = bedmap_segments(epsg)
+    segs = list(segs)
     if include_extra:
         from extra_sources import extra_segments
         ex = extra_segments(epsg)
         print(f"  + {len(ex[0])} segments from extra_sources")
-        segs = [np.concatenate([a, b]) for a, b in zip(segs, ex)]
+        segs = [np.concatenate([a, b.astype(np.float32)]) for a, b in zip(segs, ex)]
     return tuple(segs)
 
 def load_xopr(region_filter=None):
@@ -136,27 +138,32 @@ def extract_segments(geometries, epsg):
             np.concatenate(x2s), np.concatenate(y2s))
 
 
-def bin_line_km(x1, y1, x2, y2, grid_m, max_extent):
-    """Bin segment lengths into grid cells, subdividing long segments."""
-    dists = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    ok = dists > 0
-    x1, y1, x2, y2, dists = x1[ok], y1[ok], x2[ok], y2[ok], dists[ok]
+def bin_line_km(x1, y1, x2, y2, grid_m, max_extent, chunk=5_000_000):
+    """Bin segment lengths into grid cells, subdividing long segments.
 
-    n_sub = np.maximum(1, np.ceil(dists / SUBDIV).astype(int))
-    total = n_sub.sum()
-    offsets = np.repeat(np.cumsum(n_sub) - n_sub, n_sub)
-    idx = np.arange(total) - offsets
-    rn = np.repeat(n_sub, n_sub).astype(float)
-    mx = np.repeat(x1, n_sub) + np.repeat(x2 - x1, n_sub) * (idx + 0.5) / rn
-    my = np.repeat(y1, n_sub) + np.repeat(y2 - y1, n_sub) * (idx + 0.5) / rn
-    sl = np.repeat(dists, n_sub) / rn
-
+    Processed in chunks so peak memory stays a few hundred MB for ~80M segments.
+    """
     nx = int(2 * max_extent / grid_m)
     grid = np.zeros((nx, nx))
-    ix = ((mx + max_extent) / grid_m).astype(int)
-    iy = ((my + max_extent) / grid_m).astype(int)
-    valid = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < nx)
-    np.add.at(grid, (ix[valid], iy[valid]), sl[valid])
+    for s in range(0, len(x1), chunk):
+        a1, b1, a2, b2 = (np.asarray(v[s:s + chunk], dtype=np.float64) for v in (x1, y1, x2, y2))
+        dists = np.sqrt((a2 - a1)**2 + (b2 - b1)**2)
+        ok = dists > 0
+        a1, b1, a2, b2, dists = a1[ok], b1[ok], a2[ok], b2[ok], dists[ok]
+
+        n_sub = np.maximum(1, np.ceil(dists / SUBDIV).astype(int))
+        total = n_sub.sum()
+        offsets = np.repeat(np.cumsum(n_sub) - n_sub, n_sub)
+        idx = np.arange(total) - offsets
+        rn = np.repeat(n_sub, n_sub).astype(float)
+        mx = np.repeat(a1, n_sub) + np.repeat(a2 - a1, n_sub) * (idx + 0.5) / rn
+        my = np.repeat(b1, n_sub) + np.repeat(b2 - b1, n_sub) * (idx + 0.5) / rn
+        sl = np.repeat(dists, n_sub) / rn
+
+        ix = ((mx + max_extent) / grid_m).astype(int)
+        iy = ((my + max_extent) / grid_m).astype(int)
+        valid = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < nx)
+        np.add.at(grid, (ix[valid], iy[valid]), sl[valid])
     return grid / 1000.0  # m → km
 
 

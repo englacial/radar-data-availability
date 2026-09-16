@@ -112,48 +112,52 @@ def load_bedmap_catalog(collections=("bedmap2", "bedmap3"), exclude=True):
     return df.reset_index(drop=True)
 
 
-def load_bedmap_points(collections=("bedmap1", "bedmap2", "bedmap3"), local_cache=True):
-    """Kept BedMap points (lon, lat, source_file, row) sorted along track."""
-    from xopr.bedmap import fetch_bedmap, query_bedmap
-    fetch_bedmap()
-    df = query_bedmap(collections=list(collections),
-                      columns=["lon", "lat", "source_file", "row"],
-                      local_cache=local_cache, show_progress=True)
-    n_files = df["source_file"].nunique()
-    df = df[df["source_file"].isin(kept_source_files(collections))]
-    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files "
-          f"({n_files - df['source_file'].nunique()} excluded or duplicate files dropped)")
-    return df.sort_values(["source_file", "row"])
+def bedmap_segments(epsg="EPSG:3031", collections=("bedmap1", "bedmap2", "bedmap3"),
+                    max_point_spacing_m=MAX_POINT_SPACING_M, with_km=False):
+    """Gap-filtered flight-line segments of all kept BedMap files.
 
-
-def point_segments(df, epsg="EPSG:3031", max_point_spacing_m=MAX_POINT_SPACING_M):
-    """Segments between consecutive points of one file, shorter than the gap limit.
-
-    Returns x1, y1, x2, y2 in ``epsg`` plus the segment lengths in geodesic
-    km and the source_file of each segment.
+    Files are fetched to ``radar_cache/bedmap/`` if missing and processed one
+    at a time (peak memory is one file plus the float32 output, not the 80M
+    point table). Returns ``(x1, y1, x2, y2)`` in ``epsg`` and, if
+    ``with_km``, a Series of geodesic km per file.
     """
+    import pyarrow.parquet as pq
+    import shapely
+    from xopr.bedmap import fetch_bedmap
+    paths = sorted(p for v, ps in fetch_bedmap().items() if v in collections for p in ps)
+    keep = kept_source_files(collections)
     tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
-    lon, lat = df["lon"].to_numpy(), df["lat"].to_numpy()
-    xs, ys = tf.transform(lon, lat)
-    same_file = df["source_file"].to_numpy()[:-1] == df["source_file"].to_numpy()[1:]
-    dists = np.hypot(np.diff(xs), np.diff(ys))
-    ok = same_file & (dists < max_point_spacing_m) & (dists > 0)
-    km = _GEOD.inv(lon[:-1][ok], lat[:-1][ok], lon[1:][ok], lat[1:][ok])[2] / 1000.0
-    return xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok], km, df["source_file"].to_numpy()[:-1][ok]
+    parts, km, n_pts, n_files = [], {}, 0, 0
+    for path in paths:
+        name = Path(path).stem
+        if name not in keep:
+            continue
+        t = pq.read_table(path, columns=["geometry", "row"]).sort_by("row")
+        c = shapely.get_coordinates(shapely.from_wkb(t.column("geometry").to_numpy(zero_copy_only=False)))
+        lon, lat = c[:, 0], c[:, 1]
+        xs, ys = tf.transform(lon, lat)
+        d = np.hypot(np.diff(xs), np.diff(ys))
+        ok = (d < max_point_spacing_m) & (d > 0)
+        parts.append(np.column_stack([xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok]]).astype(np.float32))
+        if with_km:
+            km[name] = _GEOD.inv(lon[:-1][ok], lat[:-1][ok], lon[1:][ok], lat[1:][ok])[2].sum() / 1000.0
+        n_pts += len(lon); n_files += 1
+    seg = np.concatenate(parts)
+    print(f"  {n_pts} BedMap points from {n_files} files ({len(paths) - n_files} excluded or duplicate files dropped)")
+    return tuple(seg[:, i] for i in range(4)), pd.Series(km, name="line_km").rename_axis("name")
 
 
 def campaign_point_km(rebuild=False):
     """Gap-filtered line-km per BedMap file, from ``bedmap_campaign_km.csv``.
 
     The table is rebuilt from the point data (all three BedMap versions,
-    ~90M points, needs the point cache) when missing or ``rebuild`` is set;
+    ~90M points, fetched to the point cache) when missing or ``rebuild`` is set;
     run ``python bedmap_common.py`` to refresh it after changing the rules.
     """
     if CAMPAIGN_KM_FILE.exists() and not rebuild:
         return pd.read_csv(CAMPAIGN_KM_FILE, index_col="name")["line_km"]
-    df = load_bedmap_points()
-    *_, seg_km, files = point_segments(df)
-    km = pd.Series(seg_km).groupby(files).sum().rename("line_km").rename_axis("name")
+    _, km = bedmap_segments(with_km=True)
+    km = km.sort_index()
     km.to_csv(CAMPAIGN_KM_FILE)
     return km
 
