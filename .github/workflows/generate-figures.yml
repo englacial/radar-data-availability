@@ -32,6 +32,9 @@ jobs:
       - name: Generate combined availability figure
         run: uv run python plot_combined_availability.py
 
+      - name: Generate by-country availability figure
+        run: uv run python plot_bedmap_availability.py --no-haps
+
       - name: Generate BedMap Antarctica survey density
         run: uv run python plot_survey_density.py --source bedmap --region antarctica
 
