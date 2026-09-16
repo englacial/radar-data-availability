@@ -17,7 +17,11 @@ from bedmap_common import campaign_years, load_bedmap_catalog
 from extra_sources import load_extra_campaigns
 
 p = argparse.ArgumentParser(description=__doc__)
-p.add_argument("--no-haps", action="store_true", help="Omit the HAPS capability line")
+p.add_argument("--reference-line", type=float, metavar="KM",
+               help="Draw a horizontal reference line at this many line-km "
+                    "(e.g. 153000 for one HAPS UAV over an 11 week mission)")
+p.add_argument("--reference-label", default="",
+               help="Label for the reference line")
 args = p.parse_args()
 
 SCRIPT_DIR = Path(__file__).parent
@@ -75,12 +79,13 @@ fig, ax = plt.subplots(figsize=(14, 7))
                         color=[COUNTRY_COLORS[c] for c in pivot.columns],
                         width=0.8, edgecolor="none")
 
-if not args.no_haps:
-    haps_km = 153
-    ax.axhline(haps_km, color="red", linestyle="--", linewidth=2)
-    ax.annotate("Capability of 1 HAPS UAV, 11 week mission",
-                xy=(0.35, haps_km + 2), xycoords=("axes fraction", "data"),
-                fontsize=16, color="red", fontweight="bold", ha="center")
+if args.reference_line is not None:
+    ref = args.reference_line / 1000
+    ax.axhline(ref, color="red", linestyle="--", linewidth=2)
+    if args.reference_label:
+        ax.annotate(args.reference_label, xy=(0.35, ref + 2),
+                    xycoords=("axes fraction", "data"), fontsize=16,
+                    color="red", fontweight="bold", ha="center")
 
 ax.set_title("Line-km of global Antarctic airborne radar surveying", fontsize=20)
 ax.set_xlabel("year", fontsize=17)
@@ -89,7 +94,7 @@ ax.tick_params(axis="both", labelsize=14)
 ax.legend(title="Country", fontsize=14, title_fontsize=15,
           loc="upper right", framealpha=0.9)
 plt.tight_layout()
-suffix = "_nohaps" if args.no_haps else ""
+suffix = "_ref" if args.reference_line is not None else ""
 out_path = OUT_DIR / f"bedmap_data_availability{suffix}.png"
 plt.savefig(out_path, dpi=150, bbox_inches="tight")
 plt.show()

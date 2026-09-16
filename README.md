@@ -91,8 +91,8 @@ Stacked bar chart of BedMap line-km per year, colored by country of origin.
 ```bash
 uv run python plot_bedmap_availability.py
 # -> outputs/bedmap_data_availability.png
-uv run python plot_bedmap_availability.py --no-haps
-# -> outputs/bedmap_data_availability_nohaps.png (without the HAPS capability line)
+uv run python plot_bedmap_availability.py --reference-line 153000 --reference-label "Capability of 1 HAPS UAV, 11 week mission"
+# -> outputs/bedmap_data_availability_ref.png (with a labelled reference line)
 ```
 
 ### `plot_opr_availability.py`
