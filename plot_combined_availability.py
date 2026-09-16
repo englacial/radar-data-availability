@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """Combined figure: BedMap vs xOPR data availability.
 
-For 2000-2019, xOPR data is a subset of BedMap. For 2020+, only xOPR exists.
-Three categories: "Open access to raw data" (xOPR), "Commitment to release"
-(AWI all years + UTIG 2008+), and "Raw data not released" (remainder).
+Totals come from the BedMap catalog plus the direct sources in extra_sources
+(AWI tracks, KOPRI helicopter surveys, xOPR substitutes). Three categories:
+"Open access to raw data" (xOPR), "Commitment to release" (AWI all years,
+including data released outside xOPR, + UTIG 2008+), and "Raw data not
+released" (remainder, including the KOPRI helicopter data).
 """
 
 import argparse
 from pathlib import Path
 
-import duckdb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xopr
-from pyproj import Geod
-from shapely import wkt
+
+from bedmap_common import campaign_years, geod_km, load_bedmap_catalog
+from extra_sources import load_extra_campaigns
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--haps", action="store_true",
@@ -31,81 +33,36 @@ SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
-# Excluded BedMap datasets (scattered points, not reliable flight lines)
-EXCLUDE_NAMES = {
-    "RNRF_2008_Vostok-Subglacial-Lake_AIR_BM2",
-    "CRESIS_2009_Thwaites_AIR_BM3",
-}
-
-
-def geod_km_wkt(geometry_wkt):
-    """Geodesic length of a WKT geometry in km."""
-    geom = wkt.loads(geometry_wkt)
-    geod = Geod(ellps="WGS84")
-    total = 0.0
-    lines = geom.geoms if hasattr(geom, "geoms") else [geom]
-    for line in lines:
-        coords = list(line.coords)
-        for i in range(len(coords) - 1):
-            _, _, d = geod.inv(coords[i][0], coords[i][1],
-                               coords[i + 1][0], coords[i + 1][1])
-            total += d
-    return total / 1000.0
-
-
-def geod_km(geometry):
-    """Geodesic length of a shapely geometry in km."""
-    if geometry is None or geometry.is_empty:
-        return 0.0
-    geod = Geod(ellps="WGS84")
-    coords = list(geometry.coords)
-    total = 0.0
-    for i in range(len(coords) - 1):
-        _, _, d = geod.inv(coords[i][0], coords[i][1],
-                           coords[i + 1][0], coords[i + 1][1])
-        total += d
-    return total / 1000.0
-
-
 # --- BedMap line-km per year (2000-2020) --- (Antarctic only, skip for Greenland)
 if not args.greenland:
     print("Querying BedMap catalogs...")
-    conn = duckdb.connect()
-    conn.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
-    urls = [f"https://data.source.coop/englacial/bedmap/bedmap{v}.parquet" for v in [2, 3]]
-    query = " UNION ALL ".join(
-        f"SELECT ST_AsText(geometry) as geom_wkt, name, "
-        f"temporal_start, temporal_end FROM read_parquet('{u}')" for u in urls
-    )
-    bm = conn.execute(query).fetchdf()
-    conn.close()
-
-    bm = bm[~bm["name"].isin(EXCLUDE_NAMES)]
-    bm["base_name"] = bm["name"].str.replace(r"_BM[123]$", "", regex=True)
-    bm = bm.sort_values("name").drop_duplicates(subset="base_name", keep="last")
-    bm["line_km"] = bm["geom_wkt"].apply(geod_km_wkt)
-    bm["ts"] = pd.to_datetime(bm["temporal_start"], format="ISO8601")
-    bm["te"] = pd.to_datetime(bm["temporal_end"], format="ISO8601", errors="coerce")
-    bm["te"] = bm["te"].fillna(bm["ts"])
+    # Exclusions, BM2/BM3 dedup and date parsing live in bedmap_common.
+    bm = load_bedmap_catalog(["bedmap2", "bedmap3"])
+    bm = pd.concat([bm, load_extra_campaigns()], ignore_index=True)
 
     bm_rows = []
     for _, r in bm.iterrows():
-        y_start, y_end = r["ts"].year, r["te"].year
-        n_years = y_end - y_start + 1
+        years = campaign_years(r)
         prefix = r["name"].split("_")[0]
-        committed = prefix == "AWI" or (prefix == "UTIG" and y_start >= 2008)
-        for y in range(y_start, y_end + 1):
-            bm_rows.append({"year": y, "line_km": r["line_km"] / n_years,
-                             "committed": committed})
+        committed = (r.get("access") == "committed" or prefix == "AWI"
+                     or (prefix == "UTIG" and years[0] >= 2008))
+        # Data that OPR may also host (CReSIS/NASA, UTIG, substituted xOPR
+        # collections) is reconciled against the xOPR total below; other
+        # providers' data is never in xOPR and is added on top.
+        in_opr_pool = prefix in ("NASA", "CRESIS", "UTIG") or r.get("source") == "opr"
+        for y in years:
+            bm_rows.append({"year": y, "line_km": r["line_km"] / len(years),
+                             "committed": committed, "pool": in_opr_pool})
 
     bm_df = pd.DataFrame(bm_rows)
-    bedmap_yearly = (bm_df.groupby("year")["line_km"].sum()
-                     .reindex(range(2001, 2024), fill_value=0))
-    committed_yearly = (bm_df[bm_df["committed"]].groupby("year")["line_km"].sum()
-                        .reindex(range(2001, 2024), fill_value=0))
+    _yr = lambda d: d.groupby("year")["line_km"].sum().reindex(range(2001, 2026), fill_value=0)
+    pool_yearly = _yr(bm_df[bm_df["pool"]])
+    other_yearly = _yr(bm_df[~bm_df["pool"]])
+    committed_yearly = _yr(bm_df[bm_df["committed"]])
 else:
-    bedmap_yearly = pd.Series(0, index=range(2001, 2024))
-    committed_yearly = pd.Series(0, index=range(2001, 2024))
+    pool_yearly = pd.Series(0, index=range(2001, 2026))
+    other_yearly = pd.Series(0, index=range(2001, 2026))
+    committed_yearly = pd.Series(0, index=range(2001, 2026))
 
 # --- xOPR line-km per year (Antarctic + Greenland) ---
 print("Querying xOPR catalog...")
@@ -133,19 +90,21 @@ for cid in all_ids:
 
 def _yearly_sum(rows):
     if not rows:
-        return pd.Series(0, index=range(2001, 2024), dtype=float)
+        return pd.Series(0, index=range(2001, 2026), dtype=float)
     return (pd.DataFrame(rows).groupby("year")["line_km"].sum()
-            .reindex(range(2001, 2024), fill_value=0))
+            .reindex(range(2001, 2026), fill_value=0))
 
 opr_yearly = _yearly_sum(opr_rows)
 # Greenland xOPR data is not in BedMap, so add it to the BedMap total
 greenland_yearly = _yearly_sum(greenland_rows)
 
 # --- Combine: open access / commitment / not released ---
-# Greenland xOPR is additional to BedMap (Antarctic only), so add it to totals
-years = np.arange(2001, 2024)
+# Antarctic xOPR data overlaps the CReSIS/NASA/UTIG pool, so take the larger of
+# the two; providers outside OPR (AWI, BAS, ...) and Greenland xOPR add on top.
+years = np.arange(2001, 2026)
 open_km = opr_yearly.values
-total_km = np.maximum(bedmap_yearly.values + greenland_yearly.values, open_km)
+total_km = (np.maximum(pool_yearly.values, open_km - greenland_yearly.values)
+            + other_yearly.values + greenland_yearly.values)
 # Committed data not yet in xOPR (cap at remaining BedMap after removing xOPR)
 remaining = total_km - open_km
 commit_km = np.minimum(committed_yearly.values, remaining)

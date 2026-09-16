@@ -67,35 +67,36 @@ ZOOM_REGIONS = {
 }
 
 
-def load_bedmap(epsg, max_point_spacing_m=1000, local_cache=True):
-    """Load BedMap2+3 point data and return projected segment endpoints.
+def load_bedmap(epsg, local_cache=True, include_extra=True):
+    """BedMap point data (plus extra_sources tracks) as projected segment endpoints.
+
+    Uses the shared gap rule in ``bedmap_common`` (``MAX_POINT_SPACING_M``), so
+    the grids and the bar charts count the same line-km. Point files are
+    always read from the local cache (``radar_cache/bedmap/``), fetching any
+    that are missing; ``local_cache`` is kept for CLI compatibility.
 
     Parameters
     ----------
     epsg : str
         Target CRS (e.g. "EPSG:3031").
-    max_point_spacing_m : float
-        Discard segments longer than this (gap between survey points).
+    include_extra : bool
+        Append the direct-source tracks from extra_sources (AWI, KOPRI, xOPR
+        substitutes), which replace the corresponding BedMap files.
 
     Returns
     -------
     x1, y1, x2, y2 : np.ndarray
         Segment endpoint arrays in the target CRS.
     """
-    from xopr.bedmap import query_bedmap, fetch_bedmap
-    tf = Transformer.from_crs("EPSG:4326", epsg, always_xy=True)
-    fetch_bedmap()
-    df = query_bedmap(collections=["bedmap1", "bedmap2", "bedmap3"],
-                      columns=["lon", "lat", "source_file", "row"],
-                      local_cache=local_cache, show_progress=True)
-    print(f"  {len(df)} BedMap points from {df['source_file'].nunique()} files")
-    df = df.sort_values(["source_file", "row"])
-    xs, ys = tf.transform(df["lon"].values, df["lat"].values)
-    # Mask transitions between files so we don't connect unrelated points
-    same_file = df["source_file"].values[:-1] == df["source_file"].values[1:]
-    dists = np.sqrt(np.diff(xs)**2 + np.diff(ys)**2)
-    ok = same_file & (dists < max_point_spacing_m) & (dists > 0)
-    return xs[:-1][ok], ys[:-1][ok], xs[1:][ok], ys[1:][ok]
+    from bedmap_common import bedmap_segments
+    segs, _ = bedmap_segments(epsg)
+    segs = list(segs)
+    if include_extra:
+        from extra_sources import extra_segments
+        ex = extra_segments(epsg)
+        print(f"  + {len(ex[0])} segments from extra_sources")
+        segs = [np.concatenate([a, b.astype(np.float32)]) for a, b in zip(segs, ex)]
+    return tuple(segs)
 
 def load_xopr(region_filter=None):
     """Load geometries from xOPR STAC catalog.
@@ -137,27 +138,32 @@ def extract_segments(geometries, epsg):
             np.concatenate(x2s), np.concatenate(y2s))
 
 
-def bin_line_km(x1, y1, x2, y2, grid_m, max_extent):
-    """Bin segment lengths into grid cells, subdividing long segments."""
-    dists = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-    ok = dists > 0
-    x1, y1, x2, y2, dists = x1[ok], y1[ok], x2[ok], y2[ok], dists[ok]
+def bin_line_km(x1, y1, x2, y2, grid_m, max_extent, chunk=5_000_000):
+    """Bin segment lengths into grid cells, subdividing long segments.
 
-    n_sub = np.maximum(1, np.ceil(dists / SUBDIV).astype(int))
-    total = n_sub.sum()
-    offsets = np.repeat(np.cumsum(n_sub) - n_sub, n_sub)
-    idx = np.arange(total) - offsets
-    rn = np.repeat(n_sub, n_sub).astype(float)
-    mx = np.repeat(x1, n_sub) + np.repeat(x2 - x1, n_sub) * (idx + 0.5) / rn
-    my = np.repeat(y1, n_sub) + np.repeat(y2 - y1, n_sub) * (idx + 0.5) / rn
-    sl = np.repeat(dists, n_sub) / rn
-
+    Processed in chunks so peak memory stays a few hundred MB for ~80M segments.
+    """
     nx = int(2 * max_extent / grid_m)
     grid = np.zeros((nx, nx))
-    ix = ((mx + max_extent) / grid_m).astype(int)
-    iy = ((my + max_extent) / grid_m).astype(int)
-    valid = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < nx)
-    np.add.at(grid, (ix[valid], iy[valid]), sl[valid])
+    for s in range(0, len(x1), chunk):
+        a1, b1, a2, b2 = (np.asarray(v[s:s + chunk], dtype=np.float64) for v in (x1, y1, x2, y2))
+        dists = np.sqrt((a2 - a1)**2 + (b2 - b1)**2)
+        ok = dists > 0
+        a1, b1, a2, b2, dists = a1[ok], b1[ok], a2[ok], b2[ok], dists[ok]
+
+        n_sub = np.maximum(1, np.ceil(dists / SUBDIV).astype(int))
+        total = n_sub.sum()
+        offsets = np.repeat(np.cumsum(n_sub) - n_sub, n_sub)
+        idx = np.arange(total) - offsets
+        rn = np.repeat(n_sub, n_sub).astype(float)
+        mx = np.repeat(a1, n_sub) + np.repeat(a2 - a1, n_sub) * (idx + 0.5) / rn
+        my = np.repeat(b1, n_sub) + np.repeat(b2 - b1, n_sub) * (idx + 0.5) / rn
+        sl = np.repeat(dists, n_sub) / rn
+
+        ix = ((mx + max_extent) / grid_m).astype(int)
+        iy = ((my + max_extent) / grid_m).astype(int)
+        valid = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < nx)
+        np.add.at(grid, (ix[valid], iy[valid]), sl[valid])
     return grid / 1000.0  # m → km
 
 
@@ -170,6 +176,8 @@ if __name__ == "__main__":
                    default="antarctica")
     p.add_argument("--zoom", choices=list(ZOOM_REGIONS.keys()),
                    help="Zoom to a named sub-region")
+    p.add_argument("--no-extra", action="store_true",
+                   help="Do not add extra_sources tracks to the BedMap sources")
     p.add_argument("--grid-km", type=float, default=30)
     p.add_argument("--target-spacing", type=float, default=None,
                    help="Target survey spacing [km]; uses diverging PiYG colorscale")
@@ -186,11 +194,11 @@ if __name__ == "__main__":
     if args.source == "bedmap":
         if args.region == "greenland":
             print("  Warning: BedMap is Antarctic-only, map will be empty.")
-        x1, y1, x2, y2 = load_bedmap(reg["epsg"], local_cache=False)
+        x1, y1, x2, y2 = load_bedmap(reg["epsg"], local_cache=False, include_extra=not args.no_extra)
     elif args.source == "bedmap_local":
         if args.region == "greenland":
             print("  Warning: BedMap is Antarctic-only, map will be empty.")
-        x1, y1, x2, y2 = load_bedmap(reg["epsg"], local_cache=True)
+        x1, y1, x2, y2 = load_bedmap(reg["epsg"], local_cache=True, include_extra=not args.no_extra)
     else:
         region_filter = {"antarctica": "Antarctica",
                          "greenland": "Greenland"}[args.region]

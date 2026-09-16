@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """Stacked bar chart of BedMap line-km per year, colored by country.
 
-Recreates the reference figure from the BedMap STAC catalog data.
-Uses campaign name years from temporal_start/temporal_end metadata,
-distributing multi-year campaigns evenly across their span.
+Recreates the reference figure from the BedMap STAC catalog data, plus the
+direct sources in extra_sources (AWI tracks, KOPRI helicopter surveys, xOPR
+substitutes). BedMap campaigns are spread evenly over their
+temporal_start..temporal_end calendar years; dated sources go to their season.
 """
 
+import argparse
 from pathlib import Path
 
-import duckdb
 import matplotlib.pyplot as plt
 import pandas as pd
-from pyproj import Geod
-from shapely import wkt
+
+from bedmap_common import campaign_years, load_bedmap_catalog
+from extra_sources import load_extra_campaigns
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument("--reference-line", type=float, metavar="KM",
+               help="Draw a horizontal reference line at this many line-km "
+                    "(e.g. 153000 for one HAPS UAV over an 11 week mission)")
+p.add_argument("--reference-label", default="",
+               help="Label for the reference line")
+args = p.parse_args()
 
 SCRIPT_DIR = Path(__file__).parent
 OUT_DIR = SCRIPT_DIR / "outputs"
@@ -31,13 +41,7 @@ COUNTRY_COLORS = {
     "USA": "tab:blue", "UK": "tab:green", "Germany": "tab:orange",
     "Russia": "tab:red", "China": "tab:purple", "Other": "gray",
 }
-COUNTRY_ORDER = ["Other", "China", "Russia", "Germany", "UK", "USA"]
-
-# Excluded datasets (scattered points, not reliable flight lines)
-EXCLUDE_NAMES = {
-    "RNRF_2008_Vostok-Subglacial-Lake_AIR_BM2",
-    "CRESIS_2009_Thwaites_AIR_BM3",
-}
+COUNTRY_ORDER = ["USA", "UK", "Germany", "Russia", "China", "Other"]  # bottom to top
 
 
 def institution_to_country(name):
@@ -46,83 +50,52 @@ def institution_to_country(name):
     return COUNTRY_MAP.get(prefix, "Other")
 
 
-def line_km(geometry_wkt):
-    """Calculate geodesic length of a WKT line geometry in km."""
-    geom = wkt.loads(geometry_wkt)
-    geod = Geod(ellps="WGS84")
-    total = 0.0
-    lines = geom.geoms if hasattr(geom, "geoms") else [geom]
-    for line in lines:
-        coords = list(line.coords)
-        for i in range(len(coords) - 1):
-            _, _, d = geod.inv(coords[i][0], coords[i][1],
-                               coords[i + 1][0], coords[i + 1][1])
-            total += d
-    return total / 1000.0
+# Query bedmap2 and bedmap3 catalogs (skip bedmap1, matching reference).
+# Exclusions, dedup, date parsing and gap-filtered line-km live in bedmap_common.
+df = load_bedmap_catalog(["bedmap2", "bedmap3"])
+df = pd.concat([df, load_extra_campaigns()], ignore_index=True)
 
-
-# Query bedmap2 and bedmap3 catalogs (skip bedmap1, matching reference)
-conn = duckdb.connect()
-conn.execute("INSTALL spatial; LOAD spatial; SET enable_progress_bar = false;")
-urls = [f"https://data.source.coop/englacial/bedmap/bedmap{v}.parquet" for v in [2, 3]]
-query = " UNION ALL ".join(
-    f"SELECT ST_AsText(geometry) as geom_wkt, name, "
-    f"temporal_start, temporal_end FROM read_parquet('{u}')" for u in urls
-)
-df = conn.execute(query).fetchdf()
-conn.close()
-
-# Exclude problematic datasets
-df = df[~df["name"].isin(EXCLUDE_NAMES)]
-
-# Deduplicate: keep BM3 over BM2 for campaigns in both catalogs
-df["base_name"] = df["name"].str.replace(r"_BM[123]$", "", regex=True)
-df = df.sort_values("name").drop_duplicates(subset="base_name", keep="last")
-
-# Calculate line-km
-df["line_km"] = df["geom_wkt"].apply(line_km)
-df["ts"] = pd.to_datetime(df["temporal_start"], format="ISO8601")
-df["te"] = pd.to_datetime(df["temporal_end"], format="ISO8601")
-
-# Distribute every campaign evenly across its year range (matching reference)
+# Distribute every campaign evenly across its years (see campaign_years)
 rows = []
 for _, r in df.iterrows():
-    y_start, y_end = r["ts"].year, r["te"].year
-    n_years = y_end - y_start + 1
+    years = campaign_years(r)
     country = institution_to_country(r["name"])
-    for y in range(y_start, y_end + 1):
-        rows.append({"year": y, "line_km": r["line_km"] / n_years,
+    for y in years:
+        rows.append({"year": y, "line_km": r["line_km"] / len(years),
                      "country": country})
 
 result = pd.DataFrame(rows)
-result = result[(result["year"] >= 2000) & (result["year"] <= 2020)]
+result = result[(result["year"] >= 2000) & (result["year"] <= 2025)]
 
 # Pivot: line-km per year per country, ensure all years present
 pivot = result.pivot_table(index="year", columns="country", values="line_km",
                            aggfunc="sum", fill_value=0)
-pivot = pivot.reindex(range(2000, 2021), fill_value=0)
+pivot = pivot.reindex(range(2000, 2026), fill_value=0)
 pivot = pivot.reindex(columns=[c for c in COUNTRY_ORDER if c in pivot.columns])
 
-# Plot
+# Plot (thousands of km)
 fig, ax = plt.subplots(figsize=(14, 7))
-pivot.plot.bar(stacked=True, ax=ax,
-               color=[COUNTRY_COLORS[c] for c in pivot.columns],
-               width=0.8, edgecolor="none")
+(pivot / 1000).plot.bar(stacked=True, ax=ax,
+                        color=[COUNTRY_COLORS[c] for c in pivot.columns],
+                        width=0.8, edgecolor="none")
 
-# HAPS reference line
-haps_km = 153000
-ax.axhline(haps_km, color="red", linestyle="--", linewidth=2)
-ax.annotate("Capability of 1 HAPS UAV, 11 week mission",
-            xy=(0.35, haps_km + 2000), xycoords=("axes fraction", "data"),
-            fontsize=14, color="red", fontweight="bold", ha="center")
+if args.reference_line is not None:
+    ref = args.reference_line / 1000
+    ax.axhline(ref, color="red", linestyle="--", linewidth=2)
+    if args.reference_label:
+        ax.annotate(args.reference_label, xy=(0.35, ref + 2),
+                    xycoords=("axes fraction", "data"), fontsize=16,
+                    color="red", fontweight="bold", ha="center")
 
-ax.set_title("Line-km of global Antarctic airborne radar surveying", fontsize=16)
-ax.set_xlabel("year", fontsize=13)
-ax.set_ylabel("IPR surveying flight kilometers", fontsize=13)
-ax.legend(title="Country", fontsize=11, title_fontsize=12,
+ax.set_title("Line-km of global Antarctic airborne radar surveying", fontsize=20)
+ax.set_xlabel("year", fontsize=17)
+ax.set_ylabel("IPR surveying flight kilometers (thousands)", fontsize=17)
+ax.tick_params(axis="both", labelsize=14)
+ax.legend(title="Country", fontsize=14, title_fontsize=15,
           loc="upper right", framealpha=0.9)
 plt.tight_layout()
-out_path = OUT_DIR / "bedmap_data_availability.png"
+suffix = "_ref" if args.reference_line is not None else ""
+out_path = OUT_DIR / f"bedmap_data_availability{suffix}.png"
 plt.savefig(out_path, dpi=150, bbox_inches="tight")
 plt.show()
 print(f"Saved to {out_path}")
